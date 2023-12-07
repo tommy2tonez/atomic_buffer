@@ -33,11 +33,13 @@ namespace dg::atomic_buffer::constants{
 
     static constexpr auto METADATA_PAGE_IDX             = size_t{0};
     static constexpr auto BIN_PAGE_OFFS                 = size_t{1};
-    static constexpr const char * METADATA_NAME         = "ab_metadata";
+
+    static constexpr const char * STATE_NAME            = "ab_state";
     static constexpr const char * CONFIG_NAME           = "ab_config";
     static constexpr const char * CUR_PAGE_TRAITS       = "_curtraits";
     static constexpr const char * OLD_PAGE_TRAITS       = "_oldtraits";
     static constexpr const char * SHADOW_PAGE_TRATIS    = "_shadowtraits";
+    static constexpr const char * METADATA_NAME         = "0_curtraits";
     static constexpr const char * EXTENSION             = "bin";
 
 };
@@ -69,15 +71,6 @@ namespace dg::atomic_buffer::state{
             virtual status_type recover(status_type) = 0;
     };
 
-    class StateControllable{
-
-        public:
-
-            virtual ~StateControllable() noexcept{}
-            virtual const status_type& get() const noexcept = 0;
-            virtual void set(status_type) = 0;
-    };
-
     class StateSyncable{
 
         public:
@@ -94,15 +87,6 @@ namespace dg::atomic_buffer::state{
             virtual status_type fetch() = 0;
     };
 
-    class MetadataControllable{
-
-        public:
-
-            virtual ~MetadataControllable() noexcept{}
-            virtual const Metadata& get() const noexcept = 0;
-            virtual void set(Metadata) = 0;
-    };
-    
     class MetadataFetchable{
 
         public:
@@ -139,11 +123,11 @@ namespace dg::atomic_buffer::page{
 
     using namespace dg::atomic_buffer::types;
 
-    class DistributionPolicy{
+    class DistributorInterface{
 
         public:
 
-            virtual ~DistributionPolicy() noexcept{}
+            virtual ~DistributorInterface() noexcept{}
             virtual size_t hash(page_id_type) = 0;
     };
 
@@ -176,7 +160,7 @@ namespace dg::atomic_buffer::page_io{
         public:
 
             virtual ~Readable() noexcept{}
-            virtual void read_into(std::vector<std::pair<page_id_type, void *>>) = 0;
+            virtual void read_into(const std::vector<std::pair<page_id_type, void *>>&) = 0;
     };
 
     class Writable{
@@ -184,7 +168,7 @@ namespace dg::atomic_buffer::page_io{
         public:
 
             virtual ~Writable() noexcept{}
-            virtual void write(std::vector<std::pair<page_id_type, const void *>>) = 0;
+            virtual void write(const std::vector<std::pair<page_id_type, const void *>>&) = 0;
     };
 
 };
@@ -265,7 +249,7 @@ namespace dg::atomic_buffer::engine{
         public:
 
             virtual ~CommitingDispatchable() noexcept{}
-            virtual void dispatch(immutable_buffer_view, std::vector<page_id_type>) = 0;
+            virtual void dispatch(immutable_buffer_view, const std::vector<page_id_type>&) = 0;
     };
 
     class LoadingEngine{
@@ -273,7 +257,7 @@ namespace dg::atomic_buffer::engine{
         public:
 
             virtual ~LoadingEngine() noexcept{}
-            virtual size_t size() const noexcept = 0; 
+            virtual size_t size() = 0; 
             virtual std::unique_ptr<char[]> load() = 0;
             virtual void load_into(void *) = 0; 
     };
@@ -468,7 +452,7 @@ namespace dg::atomic_buffer::utility{
 
         static auto remove_metadata_page(std::vector<page_id_type> pages) -> std::vector<page_id_type>{
 
-            auto filterer   = [](page_id_type id){return id != constants::METADATA_PAGE_IDX;};
+            auto filterer   = [](page_id_type page_id){return page_id != constants::METADATA_PAGE_IDX;};
             auto last       = std::copy_if(pages.begin(), pages.end(), pages.begin(), filterer); 
             auto sz         = std::distance(pages.begin(), last);
 
@@ -485,6 +469,14 @@ namespace dg::atomic_buffer::utility{
             return rs;
         }
 
+        static auto get_iota_pages(size_t page_count) -> std::vector<page_id_type>{
+
+            auto rs             = std::vector<page_id_type>(page_count);
+            std::iota(rs.begin(), rs.end(), 0u);
+
+            return rs;
+        }
+
         static constexpr auto slot(size_t buf_offs, size_t page_sz) -> page_id_type{
 
             return static_cast<page_id_type>(buf_offs / page_sz);
@@ -492,7 +484,7 @@ namespace dg::atomic_buffer::utility{
 
         static constexpr auto size(size_t buf_sz, size_t page_sz) -> page_id_type{
 
-            if (buf_sz == 0){
+            if (buf_sz == 0u){
                 return page_id_type{0u};
             }
 
@@ -500,36 +492,10 @@ namespace dg::atomic_buffer::utility{
         }
     };
 
-    auto get_configuration_path(const path_type& dpath){
-
-        return (dpath / constants::CONFIG_NAME).replace_extension(constants::EXTENSION);
-    }
-
 };
 
 namespace dg::atomic_buffer::state{
     
-    class MetadataController: public virtual MetadataControllable{
-
-        private:
-
-            Metadata metadata;
-        
-        public:
-
-            MetadataController(Metadata metadata): metadata(std::move(metadata)){}
-            
-            const Metadata& get() const noexcept{
-                
-                return this->metadata;
-            }
-
-            void set(Metadata metadata){
-
-                this->metadata = std::move(metadata);
-            }
-    };
-
     class MetadataFetcher: public virtual MetadataFetchable{
 
         private:
@@ -606,8 +572,8 @@ namespace dg::atomic_buffer::state{
                 return {std::move(buf), this->page_sz};
             } 
 
-            Metadata deserialize(const void * buf){
-
+            Metadata deserialize(const void * buf){ //REVIEW: deserialization should be g(f(x)) - to perform necessary integrity check
+                
                 using _MemIO    = utility::SyncedEndiannessService;
                 using _MemUlt   = utility::MemoryUtility;
 
@@ -685,7 +651,7 @@ namespace dg::atomic_buffer::state{
                 auto files          = std::vector<path_type>(old_page_ids.size());
 
                 std::transform(old_page_ids.begin(), old_page_ids.end(), files.begin(), [&](page_id_type idx){return this->old_page_path->to_path(idx);});
-                this->deleting_device->del(std::move(files));
+                this->deleting_device->del(files);
 
                 return state::status::anchored;
             }
@@ -737,7 +703,7 @@ namespace dg::atomic_buffer::state{
                                                                                          shadow_page_path(std::move(shadow_page_path)){}
 
             status_type recover(status_type status){
-                
+
                 if (status != state::commiting){
                     std::abort();
                 }
@@ -759,12 +725,12 @@ namespace dg::atomic_buffer::state{
 
                 if (old_cur_shadow_pages.size() != 0){
                     
-                    this->symlink_resolve(std::move(old_cur_shadow_pages));
+                    this->rename_resolve(old_cur_shadow_pages);
                     return this->recover(status);               
                 }
 
-                this->old_shadow_rollback(std::move(old_shadow_pages));
-                this->old_cur_rollback(std::move(old_cur_pages));
+                this->old_shadow_rollback(old_shadow_pages);
+                this->old_cur_rollback(old_cur_pages);
                 this->remove_shadow();
 
                 return state::anchored;
@@ -772,16 +738,16 @@ namespace dg::atomic_buffer::state{
 
         private:
 
-            void symlink_resolve(std::vector<page_id_type> pages){
+            void rename_resolve(const std::vector<page_id_type>& pages){
                 
-                auto old_cur_res    = [&](page_id_type idx){dg::fileio::symlink_resolve(this->old_page_path->to_path(idx), this->cur_page_path->to_path(idx));}; //
-                auto cur_shad_res   = [&](page_id_type idx){dg::fileio::symlink_resolve(this->cur_page_path->to_path(idx), this->shadow_page_path->to_path(idx));}; //
+                auto old_cur_res    = [&](page_id_type idx){dg::fileio::rename_resolve(this->old_page_path->to_path(idx), this->cur_page_path->to_path(idx));}; //
+                auto cur_shad_res   = [&](page_id_type idx){dg::fileio::rename_resolve(this->cur_page_path->to_path(idx), this->shadow_page_path->to_path(idx));}; //
 
                 std::for_each(pages.begin(), pages.end(), old_cur_res);
                 std::for_each(pages.begin(), pages.end(), cur_shad_res);
             }
 
-            void old_shadow_rollback(std::vector<page_id_type> pages){
+            void old_shadow_rollback(const std::vector<page_id_type>& pages){
                 
                 auto rename_pairs       = std::vector<std::pair<path_type, path_type>>(pages.size());
                 auto transform_lambda   = [&](page_id_type idx){
@@ -789,10 +755,10 @@ namespace dg::atomic_buffer::state{
                 };
               
                 std::transform(pages.begin(), pages.end(), rename_pairs.begin(), transform_lambda);
-                this->rename_device->rename(std::move(rename_pairs));
+                this->rename_device->rename(rename_pairs);
             }
 
-            void old_cur_rollback(std::vector<page_id_type> pages){
+            void old_cur_rollback(const std::vector<page_id_type>& pages){
                 
                 auto rename_pairs       = std::vector<std::pair<path_type, path_type>>(pages.size());
                 auto transform_lambda   = [&](page_id_type idx){
@@ -800,8 +766,8 @@ namespace dg::atomic_buffer::state{
                 };
               
                 std::transform(pages.begin(), pages.end(), rename_pairs.begin(), transform_lambda);
-                this->rename_device->rename(std::move(rename_pairs));
-                this->old_shadow_rollback(std::move(pages));
+                this->rename_device->rename(rename_pairs);
+                this->old_shadow_rollback(pages);
             }
 
             void remove_shadow(){
@@ -811,7 +777,7 @@ namespace dg::atomic_buffer::state{
                 auto transform_lambda   = [&](page_id_type idx){return this->shadow_page_path->to_path(idx);};
 
                 std::transform(pages.begin(), pages.end(), paths.begin(), transform_lambda);
-                this->del_device->del(std::move(paths));
+                this->del_device->del(paths);
             }
     };
 
@@ -821,7 +787,6 @@ namespace dg::atomic_buffer::state{
 
             status_type recover(status_type status){
                 
-                //
                 if (status != state::commited){
                     std::abort();
                 }
@@ -835,7 +800,6 @@ namespace dg::atomic_buffer::state{
         private:
 
             std::shared_ptr<sdio::core::RenamingDeviceInterface> rename_device;
-            std::unique_ptr<page::PageInfoRetrievable> cur_page_info;
             std::unique_ptr<page::PageInfoRetrievable> old_page_info;
             std::unique_ptr<page::PathRetrievable> cur_page_path;
             std::unique_ptr<page::PathRetrievable> old_page_path;
@@ -843,11 +807,9 @@ namespace dg::atomic_buffer::state{
         public:
 
             RollingBackRecoverer(std::shared_ptr<sdio::core::RenamingDeviceInterface> rename_device,
-                                 std::unique_ptr<page::PageInfoRetrievable> cur_page_info,
                                  std::unique_ptr<page::PageInfoRetrievable> old_page_info,
                                  std::unique_ptr<page::PathRetrievable> cur_page_path,
                                  std::unique_ptr<page::PathRetrievable> old_page_path): rename_device(std::move(rename_device)),
-                                                                                        cur_page_info(std::move(cur_page_info)),
                                                                                         old_page_info(std::move(old_page_info)),
                                                                                         cur_page_path(std::move(cur_page_path)),
                                                                                         old_page_path(std::move(old_page_path)){}
@@ -859,18 +821,12 @@ namespace dg::atomic_buffer::state{
                 }
 
                 auto old_pages          = this->old_page_info->list();
-                auto cur_pages          = this->cur_page_info->list();
-                auto old_n_cur_pages    = std::vector<page_id_type>();
-                auto rename_pairs       = std::vector<std::pair<path_type, path_type>>();
+                auto rename_pairs       = std::vector<std::pair<path_type, path_type>>(old_pages.size());
                 auto transform_lambda   = [&](page_id_type idx){return std::make_pair(this->old_page_path->to_path(idx), this->cur_page_path->to_path(idx));}; 
                 
-                std::sort(old_pages.begin(), old_pages.end());
-                std::sort(cur_pages.begin(), cur_pages.end());
-                std::set_intersection(old_pages.begin(), old_pages.end(), cur_pages.begin(), cur_pages.end(), std::back_inserter(old_n_cur_pages));
-                std::transform(old_n_cur_pages.begin(), old_n_cur_pages.end(), std::back_inserter(rename_pairs), transform_lambda);
-                
-                this->rename_device->rename(std::move(rename_pairs));
-                this->rm_old_files(); //avoid symlink - because rename (old, new) when equivalent == no effect
+                std::transform(old_pages.begin(), old_pages.end(), rename_pairs.begin(), transform_lambda); //
+                this->rename_device->rename(rename_pairs);
+                this->rm_old_files(); //avoid same link - because rename (old, new) when equivalent == no effect
 
                 return state::rolled_back;
             }
@@ -880,7 +836,7 @@ namespace dg::atomic_buffer::state{
             void rm_old_files(){
 
                 auto old_pages      = this->old_page_info->list();
-                auto each_lambda    = [&](page_id_type idx){dg::fileio::assert_remove(this->old_page_path->to_path(idx));};
+                auto each_lambda    = [&](page_id_type idx){dg::fileio::assert_rm(this->old_page_path->to_path(idx));};
                 
                 std::for_each(old_pages.begin(), old_pages.end(), each_lambda);
             }        
@@ -905,63 +861,140 @@ namespace dg::atomic_buffer::state{
 
         private:
             
-            std::unique_ptr<Recoverable> anchoring_rev;
-            std::unique_ptr<Recoverable> anchored_rev;
-            std::unique_ptr<Recoverable> commiting_rev;
-            std::unique_ptr<Recoverable> committed_rev;
-            std::unique_ptr<Recoverable> rollingback_rev;
-            std::unique_ptr<Recoverable> rolledback_rev;
+            std::unique_ptr<Recoverable> anchoring_rcvr;
+            std::unique_ptr<Recoverable> anchored_rcvr;
+            std::unique_ptr<Recoverable> commiting_rcvr;
+            std::unique_ptr<Recoverable> committed_rcvr;
+            std::unique_ptr<Recoverable> rollingback_rcvr;
+            std::unique_ptr<Recoverable> rolledback_rcvr;
         
         public:
 
-            StdRecoverer(std::unique_ptr<Recoverable> anchoring_rev,
-                         std::unique_ptr<Recoverable> anchored_rev,
-                         std::unique_ptr<Recoverable> commiting_rev,
-                         std::unique_ptr<Recoverable> committed_rev,
-                         std::unique_ptr<Recoverable> rollingback_rev,
-                         std::unique_ptr<Recoverable> rolledback_rev): anchoring_rev(std::move(anchoring_rev)),
-                                                                       anchored_rev(std::move(anchored_rev)),
-                                                                       commiting_rev(std::move(commiting_rev)),
-                                                                       committed_rev(std::move(committed_rev)),
-                                                                       rollingback_rev(std::move(rollingback_rev)),
-                                                                       rolledback_rev(std::move(rolledback_rev)){}
+            StdRecoverer(std::unique_ptr<Recoverable> anchoring_rcvr,
+                         std::unique_ptr<Recoverable> anchored_rcvr,
+                         std::unique_ptr<Recoverable> commiting_rcvr,
+                         std::unique_ptr<Recoverable> committed_rcvr,
+                         std::unique_ptr<Recoverable> rollingback_rcvr,
+                         std::unique_ptr<Recoverable> rolledback_rcvr): anchoring_rcvr(std::move(anchoring_rcvr)),
+                                                                        anchored_rcvr(std::move(anchored_rcvr)),
+                                                                        commiting_rcvr(std::move(commiting_rcvr)),
+                                                                        committed_rcvr(std::move(committed_rcvr)),
+                                                                        rollingback_rcvr(std::move(rollingback_rcvr)),
+                                                                        rolledback_rcvr(std::move(rolledback_rcvr)){}
 
             status_type recover(status_type status){
             
                 switch (status){
 
                     case state::anchoring:
+                        return this->anchoring_rcvr->recover(status);
 
-                        return this->anchoring_rev->recover(status);
-                    
                     case state::anchored:
-
-                        return this->anchored_rev->recover(status);
+                        return this->anchored_rcvr->recover(status);
                     
                     case state::commiting:
-
-                        return this->commiting_rev->recover(status);
+                        return this->commiting_rcvr->recover(status);
                     
                     case state::commited:
-
-                        return this->committed_rev->recover(status);
+                        return this->committed_rcvr->recover(status);
                     
                     case state::rolling_back:
-
-                        return this->rollingback_rev->recover(status);
+                        return this->rollingback_rcvr->recover(status);
                     
                     case state::rolled_back:
-
-                        return this->rolledback_rev->recover(status);
+                        return this->rolledback_rcvr->recover(status);
                     
                     default:
-
                         std::abort(); //
                         break;
                 };
 
                 return {};
             }
+    };
+
+    struct ComponentFactory{
+        
+        static auto get_metadata_fetcher(std::unique_ptr<MetadataSerializable> metadata_serializer, path_type metadata_path) -> std::unique_ptr<MetadataFetchable>{
+
+            return std::make_unique<MetadataFetcher>(std::move(metadata_serializer), std::move(metadata_path));
+        }
+
+        static auto get_metadata_generator(std::unique_ptr<checksum::Hashable> hasher) -> std::unique_ptr<MetadataGeneratable>{
+
+            return std::make_unique<MetadataGenerator>(std::move(hasher));
+        } 
+
+        static auto get_metadata_serializer(const size_t page_sz) -> std::unique_ptr<MetadataSerializable>{
+
+            return std::make_unique<StdMetadataSerializer>(page_sz);
+        }
+
+        static auto get_state_syncer(path_type state_path) -> std::unique_ptr<StateSyncable>{
+
+            return std::make_unique<StateSyncer>(std::move(state_path));
+        } 
+
+        static auto get_state_fetcher(path_type state_path) -> std::unique_ptr<StateFetchable>{
+
+            return std::make_unique<StateFetcher>(std::move(state_path));
+        }
+
+        static auto get_anchoring_recoverer(std::shared_ptr<sdio::core::DeletingDeviceInterface> deleting_device, 
+                                            std::unique_ptr<page::PageInfoRetrievable> old_page_info,
+                                            std::unique_ptr<page::PathRetrievable> old_page_path) -> std::unique_ptr<Recoverable>{
+            
+            return std::make_unique<AnchoringRecoverer>(std::move(deleting_device), std::move(old_page_info), std::move(old_page_path));
+        }
+
+        static auto get_anchorerd_recoverer() -> std::unique_ptr<Recoverable>{
+
+            return std::make_unique<AnchoredRecoverer>();
+        }
+
+        static auto get_commiting_recoverer(std::shared_ptr<sdio::core::RenamingDeviceInterface> rename_device,
+                                            std::shared_ptr<sdio::core::DeletingDeviceInterface> del_device,
+                                            std::unique_ptr<page::PageInfoRetrievable> old_page_info,
+                                            std::unique_ptr<page::PageInfoRetrievable> cur_page_info,
+                                            std::unique_ptr<page::PageInfoRetrievable> shadow_page_info,
+                                            std::unique_ptr<page::PathRetrievable> old_page_path,
+                                            std::unique_ptr<page::PathRetrievable> cur_page_path,
+                                            std::unique_ptr<page::PathRetrievable> shadow_page_path) -> std::unique_ptr<Recoverable>{
+            
+            return std::make_unique<CommitingRecoverer>(std::move(rename_device), std::move(del_device), std::move(old_page_info), 
+                                                        std::move(cur_page_info), std::move(shadow_page_info), std::move(old_page_path),
+                                                        std::move(cur_page_path), std::move(shadow_page_path));
+        }
+
+        static auto get_commited_recoverer() -> std::unique_ptr<Recoverable>{
+
+            return std::make_unique<CommitedRecoverer>();
+        }
+
+        static auto get_rollingback_recoverer(std::shared_ptr<sdio::core::RenamingDeviceInterface> rename_device,
+                                              std::unique_ptr<page::PageInfoRetrievable> old_page_info,
+                                              std::unique_ptr<page::PathRetrievable> cur_page_path,
+                                              std::unique_ptr<page::PathRetrievable> old_page_path) -> std::unique_ptr<Recoverable>{
+            
+            return std::make_unique<RollingBackRecoverer>(std::move(rename_device), std::move(old_page_info), std::move(cur_page_path), std::move(old_page_path));
+        }
+
+        static auto get_rolledback_recoverer() -> std::unique_ptr<Recoverable>{
+
+            return std::make_unique<RolledBackRecoverer>();
+        }
+
+        static auto get_std_recoverer(std::unique_ptr<Recoverable> anchoring_rcvr,
+                                      std::unique_ptr<Recoverable> anchored_rcvr,
+                                      std::unique_ptr<Recoverable> commiting_rcvr,
+                                      std::unique_ptr<Recoverable> commited_rcvr, 
+                                      std::unique_ptr<Recoverable> rollingback_rcvr,
+                                      std::unique_ptr<Recoverable> rolledback_rcvr) -> std::unique_ptr<Recoverable>{
+            
+            return std::make_unique<StdRecoverer>(std::move(anchoring_rcvr), std::move(anchored_rcvr), 
+                                                 std::move(commiting_rcvr), std::move(commited_rcvr),
+                                                 std::move(rollingback_rcvr), std::move(rolledback_rcvr));
+        }
     };
 
 }
@@ -976,7 +1009,7 @@ namespace dg::atomic_buffer::page{
 
             static_assert(std::is_unsigned_v<page_id_type>);
 
-            path_type to_path(page_id_type id, const path_type& dir, const char * traits){ //precond - traits must not start with digits
+            path_type to_path(const path_type& dir, page_id_type id, const char * traits){ //precond - traits must not start with digits
 
                 auto fname      = std::to_string(id) + traits; 
                 auto fullname   = path_type(fname).replace_extension(constants::EXTENSION);
@@ -991,10 +1024,10 @@ namespace dg::atomic_buffer::page{
                 constexpr val_type MMIN = '0';
                 constexpr val_type MMAX = '9';
 
-                auto nis_digit          = [=](const val_type& cur){std::clamp(cur, MMIN, MMAX) != cur;};
-                auto fname              = path.filename();
+                auto nis_digit          = [=](const val_type& cur){return std::clamp(cur, MMIN, MMAX) != cur;};
+                auto fname              = path.filename().native();
                 auto fdigit             = decltype(fname)();
-                auto pos                = std::find(fname.begin(), fname.end(), nis_digit);
+                auto pos                = std::find_if(fname.begin(), fname.end(), nis_digit);
 
                 std::copy(fname.begin(), pos, std::back_inserter(fdigit));
                 return std::stoi(fdigit);
@@ -1017,7 +1050,7 @@ namespace dg::atomic_buffer::page{
 
             path_type to_path(page_id_type id){
 
-                return PathBase::to_path(id, this->dir, this->traits);
+                return PathBase::to_path(this->dir, id, this->traits);
             }
 
             page_id_type to_id(const path_type& path){
@@ -1032,12 +1065,12 @@ namespace dg::atomic_buffer::page{
         private:
 
             std::unordered_map<size_t, std::unique_ptr<PathRetrievable>> lookup_map;
-            std::unique_ptr<DistributionPolicy> distributor;
+            std::unique_ptr<DistributorInterface> distributor;
         
         public:
 
             DistributedPathRetriever(std::unordered_map<size_t, std::unique_ptr<PathRetrievable>> lookup_map,
-                                     std::unique_ptr<DistributionPolicy> distributor): lookup_map(std::move(lookup_map)),
+                                     std::unique_ptr<DistributorInterface> distributor): lookup_map(std::move(lookup_map)),
                                                                                        distributor(std::move(distributor)){}
             
             path_type to_path(page_id_type page_id){
@@ -1075,7 +1108,7 @@ namespace dg::atomic_buffer::page{
                 auto all_paths          = std::vector<std::vector<path_type>>();
                 auto filtered_paths     = std::vector<path_type>();
                 auto ids                = std::vector<page_id_type>();
-                auto filterer           = [&](const path_type& path){return path.native().find(this->traits) != std::string::npos;};
+                auto filterer           = [&](const path_type& path){return path.native().find(this->traits) != std::string::npos;}; //
                 auto path_to_id         = [&](const path_type& path){return PathBase::to_id(path);}; 
 
                 std::transform(this->dirs.begin(), this->dirs.end(), std::back_inserter(all_paths), fileio::list_paths<true>);
@@ -1093,38 +1126,36 @@ namespace dg::atomic_buffer::page{
             }
     };
 
-    struct Generator{
+    struct ComponentFactory{
 
-        static auto get_old_path_retriever(path_type dir) -> std::unique_ptr<PathRetrievable>{
+        static auto get_std_path_retriever(path_type dir, const char * traits) -> std::unique_ptr<PathRetrievable>{
 
-            return std::make_unique<StdPathRetriever>(std::move(dir), constants::OLD_PAGE_TRAITS);
+            return std::make_unique<StdPathRetriever>(std::move(dir), traits);
         }
 
-        static auto get_cur_path_retriever(path_type dir) -> std::unique_ptr<PathRetrievable>{
-
-            return std::make_unique<StdPathRetriever>(std::move(dir), constants::CUR_PAGE_TRAITS);
+        static auto get_distributed_path_retriever(std::unordered_map<size_t, std::unique_ptr<PathRetrievable>> lookup_map,
+                                                   std::unique_ptr<DistributorInterface> distributor) -> std::unique_ptr<PathRetrievable>{
+            
+            return std::make_unique<DistributedPathRetriever>(std::move(lookup_map), std::move(distributor));
         }
 
-        static auto get_shadow_path_retriever(path_type dir) -> std::unique_ptr<PathRetrievable>{
-
-            return std::make_unique<StdPathRetriever>(std::move(dir), constants::SHADOW_PAGE_TRATIS);
+        static auto get_std_page_info_retriever(std::vector<path_type> dirs, 
+                                                const char * traits, 
+                                                size_t page_sz) -> std::unique_ptr<PageInfoRetrievable>{
+            
+            return std::make_unique<StdPageInfoRetriever>(std::move(dirs), traits, page_sz);
         }
 
-        static auto get_old_page_info_retriever(path_type dir, size_t page_sz) -> std::unique_ptr<PageInfoRetrievable>{
+    };
 
-            return std::make_unique<StdPageInfoRetriever>(std::move(dir), constants::OLD_PAGE_TRAITS, page_sz);
-        }
+    struct DistributedPathRetrieverMaker{
 
-        static auto get_cur_page_info_retriever(path_type dir, size_t page_sz) -> std::unique_ptr<PageInfoRetrievable>{
+        static auto make(std::vector<path_type> dirs, const char * traits, std::vector<double> distribution) -> std::unique_ptr<PathRetrievable>{ //
 
-            return std::make_unique<StdPageInfoRetriever>(std::move(dir), constants::CUR_PAGE_TRAITS, page_sz);
-        }
-
-        static auto get_shadow_page_info_retriever(path_type dir, size_t page_sz) -> std::unique_ptr<PageInfoRetrievable>{
-
-            return std::make_unique<StdPageInfoRetriever>(std::move(dir), constants::SHADOW_PAGE_TRATIS, page_sz);
+            return {};
         }
     };
+
 }
 
 namespace dg::atomic_buffer::page_io{
@@ -1133,20 +1164,20 @@ namespace dg::atomic_buffer::page_io{
 
         private:
 
-            std::shared_ptr<dg::sdio::core::ReadingDeviceInterface> reading_device;
+            std::shared_ptr<sdio::core::ReadingDeviceInterface> reading_device;
             std::unique_ptr<page::PathRetrievable> path_retriever;
             const size_t page_sz;
 
         public:
 
-            StdPageReader(std::shared_ptr<dg::sdio::core::ReadingDeviceInterface> reading_device,
+            StdPageReader(std::shared_ptr<sdio::core::ReadingDeviceInterface> reading_device,
                           std::unique_ptr<page::PathRetrievable> path_retriever,
                           size_t page_sz): reading_device(std::move(reading_device)),
                                            path_retriever(std::move(path_retriever)),
                                            page_sz(page_sz){}
             
 
-            void read_into(std::vector<std::pair<page_id_type, void *>> data){
+            void read_into(const std::vector<std::pair<page_id_type, void *>>& data){
                 
                 auto read_arg           = std::vector<std::tuple<path_type, void *, size_t>>(data.size());
                 auto transform_lambda   = [&](const std::pair<page_id_type, void *>& cur){
@@ -1154,7 +1185,7 @@ namespace dg::atomic_buffer::page_io{
                 };  
 
                 std::transform(data.begin(), data.end(), read_arg.begin(), transform_lambda);
-                this->reading_device->read_into(std::move(read_arg));
+                this->reading_device->read_into(read_arg); 
             }   
     };
 
@@ -1162,19 +1193,19 @@ namespace dg::atomic_buffer::page_io{
 
         private:
 
-            std::shared_ptr<dg::sdio::core::WritingDeviceInterface> writing_device;
+            std::shared_ptr<sdio::core::WritingDeviceInterface> writing_device;
             std::unique_ptr<page::PathRetrievable> path_retriever;
             const size_t page_sz;
 
         public:
 
-            StdPageWriter(std::shared_ptr<dg::sdio::core::WritingDeviceInterface> writing_device,
+            StdPageWriter(std::shared_ptr<sdio::core::WritingDeviceInterface> writing_device,
                           std::unique_ptr<page::PathRetrievable> path_retriever,
                           size_t page_sz): writing_device(std::move(writing_device)),
                                            path_retriever(std::move(path_retriever)),
                                            page_sz(page_sz){}
 
-            void write(std::vector<std::pair<page_id_type, const void *>> data){
+            void write(const std::vector<std::pair<page_id_type, const void *>>& data){
                 
                 auto write_arg          = std::vector<std::tuple<path_type, const void *, size_t>>(data.size());
                 auto transform_lambda   = [&](const std::pair<page_id_type, const void *>& cur){
@@ -1182,8 +1213,25 @@ namespace dg::atomic_buffer::page_io{
                 };
 
                 std::transform(data.begin(), data.end(), write_arg.begin(), transform_lambda);
-                this->writing_device->write(std::move(write_arg));
+                this->writing_device->write(write_arg);
             }
+    };
+
+    struct ComponentFactory{
+
+        static auto get_std_page_reader(std::shared_ptr<sdio::core::ReadingDeviceInterface> reading_device, 
+                                        std::unique_ptr<page::PathRetrievable> path_retriever,
+                                        size_t page_sz) -> std::unique_ptr<Readable>{
+            
+            return std::make_unique<StdPageReader>(std::move(reading_device), std::move(path_retriever), page_sz);
+        }
+
+        static auto get_std_page_writer(std::shared_ptr<sdio::core::WritingDeviceInterface> writing_device, 
+                                        std::unique_ptr<page::PathRetrievable> path_retriever,
+                                        size_t page_sz) -> std::unique_ptr<Writable>{
+            
+            return std::make_unique<StdPageWriter>(std::move(writing_device), std::move(path_retriever), page_sz);
+        }
     };
 
 };
@@ -1205,17 +1253,12 @@ namespace dg::atomic_buffer::page_reservation{
                         std::unique_ptr<page_io::Writable> page_writer): cur_page_info(std::move(cur_page_info)),
                                                                          page_writer(std::move(page_writer)){}
 
-            void reserve(size_t page_num){
-
-                if (page_num == 0){
-                    return;
-                }
-
-                //avoid crash during reservation - leaving pages in non-continuous state (this can be solved during recovery but better to be here, single responsibility)
+            void reserve(size_t page_count){
 
                 using _MemUlt   = utility::MemoryUtility; 
+
                 auto cur_pages  = this->cur_page_info->list();                
-                auto seq_pages  = std::vector<page_id_type>(page_num);
+                auto seq_pages  = std::vector<page_id_type>(page_count);
                 auto diff       = std::vector<page_id_type>();
                 auto write_data = std::vector<std::pair<page_id_type, const void *>>();
                 auto emp_buf    = _MemUlt::aligned_empty_alloc(dg::sdio::constants::STRICTEST_BLOCK_SZ, this->cur_page_info->page_size());
@@ -1224,7 +1267,7 @@ namespace dg::atomic_buffer::page_reservation{
                 std::sort(cur_pages.begin(), cur_pages.end());
                 std::set_difference(seq_pages.begin(), seq_pages.end(), cur_pages.begin(), cur_pages.end(), std::back_inserter(diff));
                 std::transform(diff.begin(), diff.end(), std::back_inserter(write_data), [&](page_id_type id){return std::make_pair(id, static_cast<const void *>(emp_buf.get()));}); //read only - no cache problem
-                this->page_writer->write(std::move(write_data));
+                this->page_writer->write(write_data);
             }
     };
     
@@ -1232,27 +1275,43 @@ namespace dg::atomic_buffer::page_reservation{
 
         private:
 
-            std::shared_ptr<dg::sdio::core::DeletingDeviceInterface> deleting_device;
+            std::shared_ptr<sdio::core::DeletingDeviceInterface> deleting_device;
             std::unique_ptr<page::PageInfoRetrievable> cur_page_info;
             std::unique_ptr<page::PathRetrievable> page_path;
         
         public:
 
-            StdShrinker(std::shared_ptr<dg::sdio::core::DeletingDeviceInterface> deleting_device,
+            StdShrinker(std::shared_ptr<sdio::core::DeletingDeviceInterface> deleting_device,
                         std::unique_ptr<page::PageInfoRetrievable> cur_page_info,
                         std::unique_ptr<page::PathRetrievable> page_path): deleting_device(std::move(deleting_device)),
                                                                            cur_page_info(std::move(cur_page_info)),
                                                                            page_path(std::move(page_path)){}
 
-            void shrink(size_t page_num){
+            void shrink(size_t page_count){
                 
                 auto all_pages  = this->cur_page_info->list();
                 auto rm_files   = std::vector<path_type>();
-                auto last       = std::copy_if(all_pages.begin(), all_pages.end(), all_pages.begin(), [=](page_id_type idx){return idx >= page_num;});
+                auto last       = std::copy_if(all_pages.begin(), all_pages.end(), all_pages.begin(), [=](page_id_type idx){return idx >= page_count;});
                 
                 std::transform(all_pages.begin(), last, std::back_inserter(rm_files), [&](page_id_type idx){return this->page_path->to_path(idx);});
-                this->deleting_device->del(std::move(rm_files));
+                this->deleting_device->del(rm_files);
             }
+    };
+
+    struct ComponentFactory{
+
+        static auto get_std_reserver(std::unique_ptr<page::PageInfoRetrievable> cur_page_info, 
+                                     std::unique_ptr<page_io::Writable> page_writer) -> std::unique_ptr<Reservable>{
+            
+            return std::make_unique<StdReserver>(std::move(cur_page_info), std::move(page_writer));
+        } 
+
+        static auto get_std_shrinker(std::shared_ptr<sdio::core::DeletingDeviceInterface> deleting_device,
+                                     std::unique_ptr<page::PageInfoRetrievable> cur_page_info,
+                                     std::unique_ptr<page::PathRetrievable> cur_page_path) -> std::unique_ptr<Shrinkable>{
+            
+            return std::make_unique<StdShrinker>(std::move(deleting_device), std::move(cur_page_info), std::move(cur_page_path));
+        }
     };
 
 };
@@ -1265,16 +1324,16 @@ namespace dg::atomic_buffer::checksum{
 
         public:
 
-            checksum_type checksum(const void * buf, size_t buf_sz){
+            checksum_type get(immutable_buffer_view buf){
                 
                 using _MemIO    = utility::SyncedEndiannessService; 
                 using _MemUlt   = utility::MemoryUtility;
 
                 const auto MOD  = std::numeric_limits<checksum_type>::max() >> 1;
-                auto ibuf       = buf;
+                auto ibuf       = buf.first;
                 auto rs         = checksum_type{};
                 auto tmp        = checksum_type{};
-                auto cycles     = static_cast<size_t>(buf_sz / sizeof(checksum_type));
+                auto cycles     = static_cast<size_t>(buf.second / sizeof(checksum_type));
 
                 for (size_t i = 0; i < cycles; ++i){
                     
@@ -1287,6 +1346,14 @@ namespace dg::atomic_buffer::checksum{
 
                 return rs;
             }
+    };
+
+    struct ComponentFactory{
+
+        static auto get_std_hasher() -> std::unique_ptr<Hashable>{
+
+            return std::make_unique<Hasher>();
+        }
     };
 
 };
@@ -1318,15 +1385,15 @@ namespace dg::atomic_buffer::page_keeper{
 
             void add(size_t offset, size_t sz) noexcept{
                 
-                //
-                if (sz == 0){
+                if (sz == 0u){
                     return;
                 }
-                
-                size_t bob_page_idx = offset / this->page_sz;
-                size_t eob_page_idx = (offset + sz - 1) / this->page_sz;
 
-                for (size_t i = bob_page_idx; i <= eob_page_idx; ++i){
+                using _PageUlt  = utility::PageUtility;
+                size_t beg      = _PageUlt::slot(offset, this->page_sz);
+                size_t last     = _PageUlt::size(offset + sz, this->page_sz);
+
+                for (size_t i = beg; i < last; ++i){
                     this->injective_bloom_filter[i] = true;
                 }
             }
@@ -1345,6 +1412,17 @@ namespace dg::atomic_buffer::page_keeper{
             }
     };
 
+    struct ComponentFactory{
+
+        static auto get_std_page_observer(size_t max_page_count, size_t page_sz) -> std::unique_ptr<PageObservable>{
+
+            auto bfilter    = std::vector<bool>();
+            bfilter.resize(max_page_count, false);          
+
+            return std::make_unique<StdPageObserver>(std::move(bfilter), page_sz);
+        } 
+
+    };
 };
 
 namespace dg::atomic_buffer::page_discretizer{
@@ -1368,11 +1446,10 @@ namespace dg::atomic_buffer::page_discretizer{
             std::vector<const_discretized_type> get(const void * buf, const std::vector<page_id_type>& page_ids){
 
                 using _MemUlt       = utility::MemoryUtility;
-                auto idx_set        = std::unordered_set<page_id_type>(page_ids.begin(), page_ids.end());
-                auto rs             = std::vector<const_discretized_type>(idx_set.size());
+                auto rs             = std::vector<const_discretized_type>(page_ids.size());
                 auto discretizer    = [&](page_id_type idx) -> const_discretized_type{return {idx, _MemUlt::forward_shift(buf, this->page_size * idx)};};
 
-                std::transform(idx_set.begin(), idx_set.end(), rs.begin(), discretizer);
+                std::transform(page_ids.begin(), page_ids.end(), rs.begin(), discretizer);
 
                 return rs;
             }
@@ -1380,45 +1457,46 @@ namespace dg::atomic_buffer::page_discretizer{
             std::vector<discretized_type> get(void * buf, const std::vector<page_id_type>& page_ids){
 
                 using _MemUlt       = utility::MemoryUtility;
-                auto idx_set        = std::unordered_set<page_id_type>(page_ids.begin(), page_ids.end());
-                auto rs             = std::vector<discretized_type>(idx_set.size());
+                auto rs             = std::vector<discretized_type>(page_ids.size());
                 auto discretizer    = [&](page_id_type idx) -> discretized_type{return {idx, _MemUlt::forward_shift(buf, this->page_size * idx)};};
 
-                std::transform(idx_set.begin(), idx_set.end(), rs.begin(), discretizer);
+                std::transform(page_ids.begin(), page_ids.end(), rs.begin(), discretizer);
 
                 return rs; 
             }
     };
 
+    struct ComponentFactory{
+
+        static auto get_std_page_discretizer(size_t page_sz) -> std::unique_ptr<PageDiscretizable>{
+
+            return std::make_unique<StdPageDiscretizer>(page_sz);
+        }
+    };
+
 };
 
-namespace dg::atomic_buffer::engine::anchor{
+namespace dg::atomic_buffer::engine{
 
     class StdAnchoringEngine: public virtual AnchoringEngine{
 
         private:
 
-            std::shared_ptr<state::StateControllable> state_controller;
-            std::shared_ptr<state::MetadataControllable> metadata_controller;
             std::unique_ptr<state::StateSyncable> state_syncer;
             std::unique_ptr<state::Recoverable> recoverer;
-            std::unique_ptr<state::MetadataFetchable> metadata_fetcher;
+            std::unique_ptr<state::StateFetchable> state_fetcher;
 
         public:
 
-            StdAnchoringEngine(std::shared_ptr<state::StateControllable> state_controller,
-                               std::shared_ptr<state::MetadataControllable> metadata_controller,
-                               std::unique_ptr<state::StateSyncable> state_syncer,
+            StdAnchoringEngine(std::unique_ptr<state::StateSyncable> state_syncer,
                                std::unique_ptr<state::Recoverable> recoverer,
-                               std::unique_ptr<state::MetadataFetchable> metadata_fetcher): state_controller(std::move(state_controller)),
-                                                                                            metadata_controller(std::move(metadata_controller)),
-                                                                                            state_syncer(std::move(state_syncer)),
-                                                                                            recoverer(std::move(recoverer)),
-                                                                                            metadata_fetcher(std::move(metadata_fetcher)){}
+                               std::unique_ptr<state::StateFetchable> state_fetcher): state_syncer(std::move(state_syncer)),
+                                                                                      recoverer(std::move(recoverer)),
+                                                                                      state_fetcher(std::move(state_fetcher)){}
 
             void anchor(){
                 
-                switch (this->state_controller->get()){
+                switch (this->state_fetcher->fetch()){
                     
                     case state::anchoring:
                         std::abort(); //invalid (invoked pre-recovered)
@@ -1456,40 +1534,34 @@ namespace dg::atomic_buffer::engine::anchor{
                 this->state_syncer->sync(state::anchoring);
                 auto new_state = this->recoverer->recover(state::anchoring);
                 this->state_syncer->sync(new_state);
-                this->state_controller->set(new_state);
-                this->metadata_controller->set(this->metadata_fetcher->fetch());
             }
     };
-
-}
-
-namespace dg::atomic_buffer::engine::load{
 
     class StdLoadingEngine: public virtual LoadingEngine{
 
         private:
 
-            std::shared_ptr<state::MetadataControllable> metadata;
+            std::unique_ptr<state::MetadataFetchable> metadata_fetcher;
             std::unique_ptr<checksum::Hashable> hasher;
             std::unique_ptr<page_discretizer::PageDiscretizable> page_discretizer;
-            std::unique_ptr<page::PageInfoRetrievable> page_info;
+            std::unique_ptr<page::PageInfoRetrievable> page_info_retriever; //
             std::unique_ptr<page_io::Readable> page_reader;
 
         public:
 
-            StdLoadingEngine(std::shared_ptr<state::MetadataControllable> metadata,
+            StdLoadingEngine(std::unique_ptr<state::MetadataFetchable> metadata_fetcher,
                              std::unique_ptr<checksum::Hashable> hasher,
                              std::unique_ptr<page_discretizer::PageDiscretizable> page_discretizer,
-                             std::unique_ptr<page::PageInfoRetrievable> page_info,
-                             std::unique_ptr<page_io::Readable> page_reader): metadata(std::move(metadata)),
+                             std::unique_ptr<page::PageInfoRetrievable> page_info_retriever,
+                             std::unique_ptr<page_io::Readable> page_reader): metadata_fetcher(std::move(metadata_fetcher)),
                                                                               hasher(std::move(hasher)),
                                                                               page_discretizer(std::move(page_discretizer)),
-                                                                              page_info(std::move(page_info)),
+                                                                              page_info_retriever(std::move(page_info_retriever)),
                                                                               page_reader(std::move(page_reader)){}
             
-            size_t size() const noexcept{
+            size_t size(){
                 
-                return this->metadata->get().buf_sz;
+                return this->metadata_fetcher->fetch().buf_sz;
             }
 
             std::unique_ptr<char[]> load(){
@@ -1502,54 +1574,54 @@ namespace dg::atomic_buffer::engine::load{
 
             void load_into(void * buf){
                 
-                if (this->size() % this->page_info->page_size() != 0){
+                if (this->size() % this->page_info_retriever->page_size() != 0){
                     std::abort(); //segfault
                 }
 
                 using _PageUlt          = utility::PageUtility;
                 auto view               = buffer_view{buf, this->size()};
-                auto pages              = this->page_info->list();
-                auto bin_pages          = _PageUlt::absolute_bin_pages_to_relative(_PageUlt::remove_metadata_page(std::move(pages)));
+                auto page_count         = _PageUlt::size(size(), this->page_info_retriever->page_size());
+                auto bin_pages          = _PageUlt::get_iota_pages(page_count);
                 auto discretized        = this->page_discretizer->get(buf, bin_pages);
 
-                this->page_reader->read_into(std::move(discretized));
+                this->page_reader->read_into(this->get_read_arg(std::move(discretized))); //
 
-                if (this->hasher->get(view) != this->metadata->get().checksum){
+                if (this->hasher->get(view) != this->metadata_fetcher->fetch().checksum){
                     throw runtime_exception::CorruptedError();
                 }
             }
         
+        private:
+
+            auto get_read_arg(std::vector<std::pair<size_t, void *>> data) -> std::vector<std::pair<size_t, void *>>{
+
+                for (auto& e: data){
+                    e.first += constants::BIN_PAGE_OFFS;
+                }
+
+                return data;
+            }
     };
-
-}
-
-namespace dg::atomic_buffer::engine::rollback{
 
     class StdRollbackEngine: public virtual RollbackEngine{
 
         private:
 
-            std::shared_ptr<state::StateControllable> state_controller;
-            std::shared_ptr<state::MetadataControllable> metadata_controller;
+            std::unique_ptr<state::StateFetchable> state_fetcher;
             std::unique_ptr<state::StateSyncable> state_syncer;
             std::unique_ptr<state::Recoverable> recoverer;
-            std::unique_ptr<state::MetadataFetchable> metadata_fetcher;
 
         public:
 
-            StdRollbackEngine(std::shared_ptr<state::StateControllable> state_controller,
-                              std::shared_ptr<state::MetadataControllable> metadata_controller,
+            StdRollbackEngine(std::unique_ptr<state::StateFetchable> state_fetcher,
                               std::unique_ptr<state::StateSyncable> state_syncer,
-                              std::unique_ptr<state::Recoverable> recoverer,
-                              std::unique_ptr<state::MetadataFetchable> metadata_fetcher): state_controller(std::move(state_controller)),
-                                                                                           metadata_controller(std::move(metadata_controller)),
-                                                                                           state_syncer(std::move(state_syncer)),
-                                                                                           recoverer(std::move(recoverer)),
-                                                                                           metadata_fetcher(std::move(metadata_fetcher)){}
+                              std::unique_ptr<state::Recoverable> recoverer): state_fetcher(std::move(state_fetcher)),
+                                                                              state_syncer(std::move(state_syncer)),
+                                                                              recoverer(std::move(recoverer)){}
 
             void rollback(){
                 
-                switch (this->state_controller->get()){
+                switch (this->state_fetcher->fetch()){
                     
                     case state::anchoring:
                         std::abort(); //invalid (invoked pre-recovered)
@@ -1586,14 +1658,8 @@ namespace dg::atomic_buffer::engine::rollback{
                 this->state_syncer->sync(state::rolling_back);
                 auto new_state  = this->recoverer->recover(state::rolling_back);
                 this->state_syncer->sync(new_state);
-                this->state_controller->set(new_state);
-                this->metadata_controller->set(this->metadata_fetcher->fetch());
             }
-    };  
-
-};
-
-namespace dg::atomic_buffer::engine::commit{
+    }; 
 
     class CommitingDispatcher: public virtual CommitingDispatchable{
 
@@ -1601,59 +1667,95 @@ namespace dg::atomic_buffer::engine::commit{
 
             const size_t page_sz;
             std::shared_ptr<sdio::core::RenamingDeviceInterface> rename_device;
-            std::unique_ptr<page_io::StdPageWriter> page_writer;
-            std::unique_ptr<state::MetadataGenerator> metadata_gen;
+            std::unique_ptr<state::MetadataFetchable> metadata_fetcher;
+            std::unique_ptr<page_io::Writable> page_writer;
+            std::unique_ptr<state::MetadataGeneratable> metadata_gen;
             std::unique_ptr<state::MetadataSerializable> metadata_serializer;
             std::unique_ptr<page_discretizer::PageDiscretizable> discretizer;
-            std::unique_ptr<page_reservation::Reservable> page_reserver;
-            std::unique_ptr<page::PathRetrievable> old_page_path;
-            std::unique_ptr<page::PathRetrievable> cur_page_path;
-            std::unique_ptr<page::PathRetrievable> shadow_page_path;
+            std::unique_ptr<page_reservation::Reservable> reserver;
+            std::unique_ptr<page::PathRetrievable> old_path_retriever;
+            std::unique_ptr<page::PathRetrievable> cur_path_retriever;
+            std::unique_ptr<page::PathRetrievable> shadow_path_retriever;
 
         public:
 
             CommitingDispatcher(size_t page_sz,
                                 std::shared_ptr<sdio::core::RenamingDeviceInterface> rename_device,
-                                std::unique_ptr<page_io::StdPageWriter> page_writer,
-                                std::unique_ptr<state::MetadataGenerator> metadata_gen,
+                                std::unique_ptr<state::MetadataFetchable> metadata_fetcher,
+                                std::unique_ptr<page_io::Writable> page_writer,
+                                std::unique_ptr<state::MetadataGeneratable> metadata_gen,
                                 std::unique_ptr<state::MetadataSerializable> metadata_serializer,
                                 std::unique_ptr<page_discretizer::PageDiscretizable> discretizer,
-                                std::unique_ptr<page_reservation::Reservable> page_reserver,
-                                std::unique_ptr<page::PathRetrievable> old_page_path,
-                                std::unique_ptr<page::PathRetrievable> cur_page_path,
-                                std::unique_ptr<page::PathRetrievable> shadow_page_path): page_sz(page_sz),
-                                                                                          rename_device(std::move(rename_device)),
-                                                                                          page_writer(std::move(page_writer)),
-                                                                                          metadata_gen(std::move(metadata_gen)),
-                                                                                          metadata_serializer(std::move(metadata_serializer)),
-                                                                                          discretizer(std::move(discretizer)),
-                                                                                          page_reserver(std::move(page_reserver)),
-                                                                                          old_page_path(std::move(old_page_path)),
-                                                                                          cur_page_path(std::move(cur_page_path)),
-                                                                                          shadow_page_path(std::move(shadow_page_path)){}
+                                std::unique_ptr<page_reservation::Reservable> reserver,
+                                std::unique_ptr<page::PathRetrievable> old_path_retriever,
+                                std::unique_ptr<page::PathRetrievable> cur_path_retriever,
+                                std::unique_ptr<page::PathRetrievable> shadow_path_retriever): page_sz(page_sz),
+                                                                                               rename_device(std::move(rename_device)),
+                                                                                               metadata_fetcher(std::move(metadata_fetcher)),
+                                                                                               page_writer(std::move(page_writer)),
+                                                                                               metadata_gen(std::move(metadata_gen)),
+                                                                                               metadata_serializer(std::move(metadata_serializer)),
+                                                                                               discretizer(std::move(discretizer)),
+                                                                                               reserver(std::move(reserver)),
+                                                                                               old_path_retriever(std::move(old_path_retriever)),
+                                                                                               cur_path_retriever(std::move(cur_path_retriever)),
+                                                                                               shadow_path_retriever(std::move(shadow_path_retriever)){}
 
-            void dispatch(immutable_buffer_view buf, std::vector<page_id_type> pages){
+            void dispatch(immutable_buffer_view buf, const std::vector<page_id_type>& pages){
                 
-                if (buf.second % this->page_sz != 0){
+                if (buf.second % this->page_sz != 0u){
                     std::abort(); //SEG_FAULT
                 }
 
                 using PageUlt       = utility::PageUtility;
-    
+                using _MemUlt       = utility::MemoryUtility;
+
+                auto org_buf_sz     = this->metadata_fetcher->fetch().buf_sz; 
+                auto empty_buf      = _MemUlt::aligned_empty_alloc(sdio::constants::STRICTEST_BLOCK_SZ, this->page_sz);
                 auto page_count     = PageUlt::size(buf.second, this->page_sz);
                 auto all_page_count = page_count + constants::BIN_PAGE_OFFS;
                 auto b_pages        = PageUlt::shrink_pages(pages, page_count);
-                auto all_pages      = PageUlt::add_metadata_page(PageUlt::relative_bin_pages_to_absolute(b_pages)); //...
-                auto metadata       = this->get_serialized_metadata(buf); //neither is this
+                auto metadata       = this->get_serialized_metadata(buf); 
                 auto discretized    = this->discretizer->get(buf.first, b_pages);
-                auto write_data     = this->get_write_data(static_cast<const void *>(metadata.get()), std::move(discretized)); //not this class resposibility - future refactoring 
+                auto wo_pages       = this->get_whiteouted_pages(buf.second, org_buf_sz);
+                auto _discretized   = this->add_empty_pages(std::move(discretized), wo_pages, static_cast<const void *>(empty_buf.get())); 
+                auto write_data     = this->get_write_data(static_cast<const void *>(metadata.get()), std::move(_discretized));
 
-                this->page_reserver->reserve(all_page_count);
-                this->page_writer->write(std::move(write_data));
-                this->forward_snap(all_pages);
+                auto snap_pages     = b_pages;
+                snap_pages.insert(snap_pages.end(), wo_pages.begin(), wo_pages.end());
+                snap_pages          = PageUlt::add_metadata_page(PageUlt::relative_bin_pages_to_absolute(std::move(snap_pages)));
+
+                this->reserver->reserve(all_page_count);
+                this->page_writer->write(write_data);
+                this->forward_snap(snap_pages); 
             }
 
         private:
+
+            auto get_whiteouted_pages(size_t new_buf_sz, size_t old_buf_sz) -> std::vector<page_id_type>{
+
+                using PageUlt           = utility::PageUtility;
+                size_t new_page_count   = PageUlt::size(new_buf_sz, this->page_sz);
+                size_t old_page_count   = PageUlt::size(old_buf_sz, this->page_sz);
+
+                if (new_page_count >= old_page_count){
+                    return {};
+                } 
+
+                size_t delta    = old_page_count - new_page_count;
+                auto rs         = std::vector<page_id_type>(delta);
+                std::iota(rs.begin(), rs.end(), new_page_count);
+
+                return rs;
+            }
+
+            auto add_empty_pages(std::vector<std::pair<page_id_type, const void *>> discretized, const std::vector<page_id_type>& wo_pages, const void * empty_buf) -> std::vector<std::pair<page_id_type, const void *>>{
+                
+                auto transform_lambda    = [=](page_id_type page_id){return std::make_pair(page_id, empty_buf);};
+                std::transform(wo_pages.begin(), wo_pages.end(), std::back_inserter(discretized), transform_lambda);
+
+                return discretized;
+            } 
 
             auto get_write_data(const void * metadata_buf, std::vector<std::pair<page_id_type, const void *>> discretized_bin) -> std::vector<std::pair<page_id_type, const void *>>{
                 
@@ -1661,7 +1763,8 @@ namespace dg::atomic_buffer::engine::commit{
                     e.first += constants::BIN_PAGE_OFFS; //make_room for metadata_page
                 }
 
-                discretized_bin.push_back({constants::METADATA_PAGE_IDX, metadata_buf});
+                auto metadata_bucket    = std::pair<page_id_type, const void *>{constants::METADATA_PAGE_IDX, metadata_buf};
+                discretized_bin.push_back(metadata_bucket);
                 return discretized_bin;
             } 
 
@@ -1678,15 +1781,15 @@ namespace dg::atomic_buffer::engine::commit{
 
             void forward_snap(const std::vector<page_id_type>& pages){
                 
-                auto cur_old_transform      = [&](page_id_type page_id){return std::make_pair(this->cur_page_path->to_path(page_id), this->old_page_path->to_path(page_id));};
-                auto shad_cur_transform     = [&](page_id_type page_id){return std::make_pair(this->shadow_page_path->to_path(page_id), this->cur_page_path->to_path(page_id));};
+                auto cur_old_transform      = [&](page_id_type page_id){return std::make_pair(this->cur_path_retriever->to_path(page_id), this->old_path_retriever->to_path(page_id));};
+                auto shad_cur_transform     = [&](page_id_type page_id){return std::make_pair(this->shadow_path_retriever->to_path(page_id), this->cur_path_retriever->to_path(page_id));};
                 auto cur_old_pairs          = std::vector<std::pair<path_type, path_type>>(pages.size());
                 auto shad_cur_pairs         = std::vector<std::pair<path_type, path_type>>(pages.size());
 
                 std::transform(pages.begin(), pages.end(), cur_old_pairs.begin(), cur_old_transform);
                 std::transform(pages.begin(), pages.end(), shad_cur_pairs.begin(), shad_cur_transform);
-                this->rename_device->rename(std::move(cur_old_pairs));
-                this->rename_device->rename(std::move(shad_cur_pairs));
+                this->rename_device->rename(cur_old_pairs);
+                this->rename_device->rename(shad_cur_pairs);
             }
     };
 
@@ -1694,9 +1797,7 @@ namespace dg::atomic_buffer::engine::commit{
 
         private:
 
-            std::shared_ptr<state::StateControllable> state_controller;
-            std::shared_ptr<state::MetadataControllable> metadata_controller;
-            std::unique_ptr<state::MetadataFetchable> metadata_fetcher;
+            std::unique_ptr<state::StateFetchable> state_fetcher;
             std::unique_ptr<state::StateSyncable> state_syncer;
             std::unique_ptr<page_keeper::PageObservable> page_observer;
             std::unique_ptr<CommitingDispatchable> dispatcher;
@@ -1704,15 +1805,11 @@ namespace dg::atomic_buffer::engine::commit{
 
         public:
 
-            StdCommittingEngine(std::shared_ptr<state::StateControllable> state_controller,
-                                std::shared_ptr<state::MetadataControllable> metadata_controller,
-                                std::unique_ptr<state::MetadataFetchable> metadata_fetcher,
+            StdCommittingEngine(std::unique_ptr<state::StateFetchable> state_fetcher,
                                 std::unique_ptr<state::StateSyncable> state_syncer,
                                 std::unique_ptr<page_keeper::PageObservable> page_observer,
                                 std::unique_ptr<CommitingDispatchable> dispatcher,
-                                immutable_buffer_view buf_view): state_controller(std::move(state_controller)),
-                                                                 metadata_controller(std::move(metadata_controller)),
-                                                                 metadata_fetcher(std::move(metadata_fetcher)),
+                                immutable_buffer_view buf_view): state_fetcher(std::move(state_fetcher)),
                                                                  state_syncer(std::move(state_syncer)),
                                                                  page_observer(std::move(page_observer)),
                                                                  dispatcher(std::move(dispatcher)),
@@ -1740,22 +1837,15 @@ namespace dg::atomic_buffer::engine::commit{
 
             void commit(){
                 
-                if (this->state_controller->get() != state::anchored){
-                    std::abort();
+                if (this->state_fetcher->fetch() != state::anchored){
+                    std::abort(); //log
                 }
 
                 this->state_syncer->sync(state::commiting);
                 this->dispatcher->dispatch(this->buf_view, this->page_observer->get());
                 this->state_syncer->sync(state::commited);
-
-                this->metadata_controller->set(this->metadata_fetcher->fetch());
-                this->state_controller->set(state::commited);
             }
     };
-
-}
-
-namespace dg::atomic_buffer::engine{
 
     class EngineInstance: public virtual engine::Engine{
 
@@ -1776,7 +1866,7 @@ namespace dg::atomic_buffer::engine{
                                                                        rollbacker(std::move(rollbacker)),
                                                                        anchorer(std::move(anchorer)){}
             
-            size_t size() const noexcept{
+            size_t size(){
                 
                 return this->loader->size();
             }
@@ -1827,18 +1917,78 @@ namespace dg::atomic_buffer::engine{
             }
     };
 
-};
+    struct ComponentFactory{
 
-namespace dg::atomic_buffer::user_interface{
+        static auto get_std_anchoring_engine(std::unique_ptr<state::StateSyncable> state_syncer,
+                                             std::unique_ptr<state::Recoverable> recoverer,
+                                             std::unique_ptr<state::StateFetchable> state_fetcher) -> std::unique_ptr<AnchoringEngine>{
+            
+            return std::make_unique<StdAnchoringEngine>(std::move(state_syncer), std::move(recoverer), std::move(state_fetcher));
+        }
+
+        static auto get_std_loading_engine(std::unique_ptr<state::MetadataFetchable> metadata_fetcher,
+                                           std::unique_ptr<checksum::Hashable> hasher,
+                                           std::unique_ptr<page_discretizer::PageDiscretizable> page_discretizer,
+                                           std::unique_ptr<page::PageInfoRetrievable> page_info_retriever,
+                                           std::unique_ptr<page_io::Readable> page_reader) -> std::unique_ptr<LoadingEngine>{
+            
+            return std::make_unique<StdLoadingEngine>(std::move(metadata_fetcher), std::move(hasher), std::move(page_discretizer), 
+                                                      std::move(page_info_retriever), std::move(page_reader));
+        }
+
+        static auto get_std_rollback_engine(std::unique_ptr<state::StateFetchable> state_fetcher,
+                                            std::unique_ptr<state::StateSyncable> state_syncer, 
+                                            std::unique_ptr<state::Recoverable> recoverer) -> std::unique_ptr<RollbackEngine>{
+            
+            return std::make_unique<StdRollbackEngine>(std::move(state_fetcher), std::move(state_syncer), std::move(recoverer));
+        }
+
+        static auto get_commiting_dispatcher(size_t page_sz,
+                                             std::shared_ptr<sdio::core::RenamingDeviceInterface> rename_device,
+                                             std::unique_ptr<state::MetadataFetchable> metadata_fetcher,
+                                             std::unique_ptr<page_io::Writable> page_writer,
+                                             std::unique_ptr<state::MetadataGeneratable> metadata_gen,
+                                             std::unique_ptr<state::MetadataSerializable> metadata_serializer,
+                                             std::unique_ptr<page_discretizer::PageDiscretizable> discretizer,
+                                             std::unique_ptr<page_reservation::Reservable> reserver,
+                                             std::unique_ptr<page::PathRetrievable> old_path_retriever,
+                                             std::unique_ptr<page::PathRetrievable> cur_path_retriever,
+                                             std::unique_ptr<page::PathRetrievable> shadow_path_retriever) -> std::unique_ptr<CommitingDispatchable>{
+            
+            return std::make_unique<CommitingDispatcher>(page_sz, std::move(rename_device), std::move(metadata_fetcher), 
+                                                         std::move(page_writer), std::move(metadata_gen), std::move(metadata_serializer), 
+                                                         std::move(discretizer), std::move(reserver), std::move(old_path_retriever),
+                                                         std::move(cur_path_retriever), std::move(shadow_path_retriever));
+        }
+
+        static auto get_std_commiting_engine(std::unique_ptr<state::StateFetchable> state_fetcher,
+                                             std::unique_ptr<state::StateSyncable> state_syncer,
+                                             std::unique_ptr<page_keeper::PageObservable> page_observer,
+                                             std::unique_ptr<CommitingDispatchable> dispatcher) -> std::unique_ptr<CommitingEngine>{
+            
+            return std::make_unique<StdCommittingEngine>(std::move(state_fetcher), std::move(state_syncer),
+                                                         std::move(page_observer), std::move(dispatcher), immutable_buffer_view{});
+        }
+
+        static auto get_engine(std::unique_ptr<LoadingEngine> loader, 
+                               std::unique_ptr<CommitingEngine> commiter, 
+                               std::unique_ptr<RollbackEngine> rollbacker,
+                               std::unique_ptr<AnchoringEngine> anchorer) -> std::unique_ptr<Engine>{
+            
+            return std::make_unique<EngineInstance>(std::move(loader), std::move(commiter), std::move(rollbacker), std::move(anchorer));
+        }
+    };
+
+}
+
+namespace dg::atomic_buffer::resources{
 
     using namespace dg::atomic_buffer::types;
 
-    struct Config{
-        path_type config_dir;
-        std::vector<path_type> bin_dirs;
-        std::vector<double> distribution_policy;
+    struct BaseConfig{
+        path_type dir;
         size_t page_sz;
-        //filesys-type 
+        size_t max_page_count;
     };
 
     struct IODevices{
@@ -1848,12 +1998,305 @@ namespace dg::atomic_buffer::user_interface{
         std::shared_ptr<sdio::core::RenamingDeviceInterface> rename_device;
     };
 
-    extern void mount(Config){
+    struct Config: BaseConfig, IODevices{};
 
+    struct Utility{
+
+        static auto get_config_path(const path_type& dir){
+
+            return (dir / constants::CONFIG_NAME).replace_extension(constants::EXTENSION);
+        }
+
+        static auto get_state_path(const path_type& dir){
+
+            return (dir / constants::STATE_NAME).replace_extension(constants::EXTENSION);;
+        }   
+
+        static auto get_metadata_path(const path_type& dir){
+
+            return (dir / constants::METADATA_NAME).replace_extension(constants::EXTENSION);
+        }
+    };
+    
+    struct StateMounter{
+
+        static void mount_state(BaseConfig config){
+            
+            state::ComponentFactory::get_state_syncer(Utility::get_state_path(config.dir))->sync(state::anchored);
+        }
+        
+        static void mount_metadata(BaseConfig config){
+
+            //bad -- 
+            auto metadata_gen           = state::ComponentFactory::get_metadata_generator(checksum::ComponentFactory::get_std_hasher()); //REVIEW: assumption use std_hasher 
+            auto metadata_serializer    = state::ComponentFactory::get_metadata_serializer(config.page_sz); //REVIEW: assumption --
+            auto metadata               = metadata_gen->get(immutable_buffer_view{});
+            auto serialized             = metadata_serializer->serialize(metadata);
+
+            dg::fileio::atomic_bwrite(Utility::get_metadata_path(config.dir), static_cast<const void *>(serialized.first.get()), serialized.second); //wrong - 
+        }
+
+    };
+
+    struct ResourceInitializer{
+
+        static void clear_n_mkdirs(BaseConfig config){
+
+            auto dirs   = std::vector<path_type>();
+            // auto dirs   = config.bin_dirs;
+            dirs.push_back(config.dir);
+
+            std::for_each(dirs.begin(), dirs.end(), dg::fileio::mkdir);
+            std::for_each(dirs.begin(), dirs.end(), static_cast<uintmax_t (*)(const path_type&)>(std::filesystem::remove_all));
+            std::for_each(dirs.begin(), dirs.end(), dg::fileio::mkdir);
+        }
+
+        static void initialize(BaseConfig config){
+
+            StateMounter::mount_metadata(config);
+            StateMounter::mount_state(config);
+        } 
+
+        static void defaultize(BaseConfig config){
+
+            clear_n_mkdirs(config);
+            initialize(config);
+        }
+    };
+
+    struct ResourceSpawner{
+
+        using _Ult  = Utility;
+ 
+        static auto get_hasher(Config config) -> std::unique_ptr<checksum::Hashable>{
+
+            return checksum::ComponentFactory::get_std_hasher();
+        }
+
+        static auto get_metadata_generator(Config config) -> std::unique_ptr<state::MetadataGeneratable>{
+
+            return state::ComponentFactory::get_metadata_generator(get_hasher(config));
+        } 
+
+        static auto get_state_syncer(Config config) -> std::unique_ptr<state::StateSyncable>{
+
+            return state::ComponentFactory::get_state_syncer(_Ult::get_state_path(config.dir));
+        }
+
+        static auto get_state_fetcher(Config config) -> std::unique_ptr<state::StateFetchable>{
+            
+            return state::ComponentFactory::get_state_fetcher(_Ult::get_state_path(config.dir)); 
+        } 
+
+        static auto get_metadata_serializer(Config config) -> std::unique_ptr<state::MetadataSerializable>{
+
+            return state::ComponentFactory::get_metadata_serializer(config.page_sz);
+        } 
+
+        static auto get_metadata_fetcher(Config config) -> std::unique_ptr<state::MetadataFetchable>{
+
+            return state::ComponentFactory::get_metadata_fetcher(get_metadata_serializer(config), 
+                                                                 _Ult::get_metadata_path(config.dir));
+        }
+
+        static auto get_old_info_retriever(Config config) -> std::unique_ptr<page::PageInfoRetrievable>{
+
+            return page::ComponentFactory::get_std_page_info_retriever({config.dir}, constants::OLD_PAGE_TRAITS, config.page_sz);
+        } 
+
+        static auto get_cur_info_retriever(Config config) -> std::unique_ptr<page::PageInfoRetrievable>{
+
+            return page::ComponentFactory::get_std_page_info_retriever({config.dir}, constants::CUR_PAGE_TRAITS, config.page_sz);
+        }
+
+        static auto get_shadow_info_retriever(Config config) -> std::unique_ptr<page::PageInfoRetrievable>{
+
+            return page::ComponentFactory::get_std_page_info_retriever({config.dir}, constants::SHADOW_PAGE_TRATIS, config.page_sz);
+        } 
+
+        static auto get_old_path_retriever(Config config) -> std::unique_ptr<page::PathRetrievable>{
+            
+            return page::ComponentFactory::get_std_path_retriever(config.dir, constants::OLD_PAGE_TRAITS);
+        }
+
+        static auto get_cur_path_retriever(Config config) -> std::unique_ptr<page::PathRetrievable>{
+
+            return page::ComponentFactory::get_std_path_retriever(config.dir, constants::CUR_PAGE_TRAITS);
+        }
+
+        static auto get_shadow_path_retriever(Config config) -> std::unique_ptr<page::PathRetrievable>{
+
+            return page::ComponentFactory::get_std_path_retriever(config.dir, constants::SHADOW_PAGE_TRATIS);
+        }
+
+        static auto get_anchoring_recoverer(Config config) -> std::unique_ptr<state::Recoverable>{
+
+            return state::ComponentFactory::get_anchoring_recoverer(config.del_device, get_old_info_retriever(config), get_old_path_retriever(config));
+        }
+
+        static auto get_anchorerd_recoverer(Config config) -> std::unique_ptr<state::Recoverable>{
+
+            return state::ComponentFactory::get_anchorerd_recoverer();
+        }
+
+        static auto get_commiting_recoverer(Config config) -> std::unique_ptr<state::Recoverable>{
+
+            return state::ComponentFactory::get_commiting_recoverer(config.rename_device, config.del_device, get_old_info_retriever(config), 
+                                                                    get_cur_info_retriever(config), get_shadow_info_retriever(config),
+                                                                    get_old_path_retriever(config), get_cur_path_retriever(config),
+                                                                    get_shadow_path_retriever(config));
+        }
+
+        static auto get_commited_recoverer(Config config) -> std::unique_ptr<state::Recoverable>{
+
+            return state::ComponentFactory::get_commited_recoverer();
+        } 
+
+        static auto get_rollingback_recoverer(Config config) -> std::unique_ptr<state::Recoverable>{
+
+            return state::ComponentFactory::get_rollingback_recoverer(config.rename_device, get_old_info_retriever(config), get_cur_path_retriever(config), 
+                                                                      get_old_path_retriever(config));
+        }
+
+        static auto get_rolledback_recoverer(Config config) -> std::unique_ptr<state::Recoverable>{
+
+            return state::ComponentFactory::get_rolledback_recoverer();
+        } 
+
+        static auto get_std_recoverer(Config config) -> std::unique_ptr<state::Recoverable>{
+
+            return state::ComponentFactory::get_std_recoverer(get_anchoring_recoverer(config), get_anchorerd_recoverer(config),
+                                                              get_commiting_recoverer(config), get_commited_recoverer(config), 
+                                                              get_rollingback_recoverer(config), get_rolledback_recoverer(config));    
+        }
+        
+        static auto get_page_reader(Config config) -> std::unique_ptr<page_io::Readable>{
+
+            return page_io::ComponentFactory::get_std_page_reader(config.reading_device, get_cur_path_retriever(config), config.page_sz);
+        }
+
+        static auto get_shadow_page_writer(Config config) -> std::unique_ptr<page_io::Writable>{
+
+            return page_io::ComponentFactory::get_std_page_writer(config.writing_device, get_shadow_path_retriever(config), config.page_sz);
+        }
+
+        static auto get_cur_page_writer(Config config) -> std::unique_ptr<page_io::Writable>{
+
+            return page_io::ComponentFactory::get_std_page_writer(config.writing_device, get_cur_path_retriever(config), config.page_sz);
+        }
+
+        static auto get_page_discretizer(Config config) -> std::unique_ptr<page_discretizer::PageDiscretizable>{
+
+            return page_discretizer::ComponentFactory::get_std_page_discretizer(config.page_sz);
+        } 
+
+        static auto get_page_observer(Config config) -> std::unique_ptr<page_keeper::PageObservable>{
+
+            return page_keeper::ComponentFactory::get_std_page_observer(config.max_page_count, config.page_sz);
+        }
+
+        static auto get_page_reserver(Config config) -> std::unique_ptr<page_reservation::Reservable>{
+
+            return page_reservation::ComponentFactory::get_std_reserver(get_cur_info_retriever(config), get_cur_page_writer(config));
+        }
+
+        static auto get_page_shrinker(Config config) -> std::unique_ptr<page_reservation::Shrinkable>{
+
+            return page_reservation::ComponentFactory::get_std_shrinker(config.del_device, get_cur_info_retriever(config), get_cur_path_retriever(config));
+        }
+
+        static auto get_commiting_dispatcher(Config config) -> std::unique_ptr<engine::CommitingDispatchable>{
+
+            return engine::ComponentFactory::get_commiting_dispatcher(config.page_sz, config.rename_device, get_metadata_fetcher(config),
+                                                                      get_shadow_page_writer(config), get_metadata_generator(config),
+                                                                      get_metadata_serializer(config), get_page_discretizer(config),
+                                                                      get_page_reserver(config), get_old_path_retriever(config), 
+                                                                      get_cur_path_retriever(config), get_shadow_path_retriever(config));
+        }
+
+        static auto get_loading_engine(Config config) -> std::unique_ptr<engine::LoadingEngine>{
+
+            return engine::ComponentFactory::get_std_loading_engine(get_metadata_fetcher(config), get_hasher(config),
+                                                                    get_page_discretizer(config), get_cur_info_retriever(config),
+                                                                    get_page_reader(config));
+        }
+
+        static auto get_commiting_engine(Config config) -> std::unique_ptr<engine::CommitingEngine>{
+
+            return engine::ComponentFactory::get_std_commiting_engine(get_state_fetcher(config), get_state_syncer(config), 
+                                                                      get_page_observer(config), get_commiting_dispatcher(config));
+        } 
+
+        static auto get_rollback_engine(Config config) -> std::unique_ptr<engine::RollbackEngine>{
+
+            return engine::ComponentFactory::get_std_rollback_engine(get_state_fetcher(config), get_state_syncer(config), 
+                                                                     get_rollingback_recoverer(config));
+        }   
+        
+        static auto get_anchoring_engine(Config config) -> std::unique_ptr<engine::AnchoringEngine>{
+            
+            return engine::ComponentFactory::get_std_anchoring_engine(get_state_syncer(config), get_anchoring_recoverer(config), 
+                                                                      get_state_fetcher(config));
+        } 
+
+        static auto get_engine(Config config) -> std::unique_ptr<engine::Engine>{
+
+            return engine::ComponentFactory::get_engine(get_loading_engine(config), get_commiting_engine(config),
+                                                        get_rollback_engine(config), get_anchoring_engine(config)); 
+        } 
+    };
+
+    struct ResourceController{
+
+        static void defaultize(BaseConfig config){  
+
+            ResourceInitializer::defaultize(config);
+        }
+
+        static auto recover(BaseConfig base_config, IODevices io_devices){
+
+            Config config{};
+            static_cast<BaseConfig&>(config)    = base_config;
+            static_cast<IODevices&>(config)     = io_devices;
+
+            dg::fileio::dskchk(config.dir);          
+            ResourceSpawner::get_state_syncer(config)->sync(ResourceSpawner::get_std_recoverer(config)->recover(ResourceSpawner::get_state_fetcher(config)->fetch())); // bad
+            auto metadata   = ResourceSpawner::get_metadata_fetcher(config)->fetch(); // bad
+            auto page_count = utility::PageUtility::size(metadata.buf_sz, config.page_sz); // bad
+            ResourceSpawner::get_page_shrinker(config)->shrink(page_count + constants::BIN_PAGE_OFFS); //bad
+        }
+
+        static auto spawn(BaseConfig base_config, IODevices io_devices) -> std::unique_ptr<engine::Engine>{
+
+            Config config{};
+            static_cast<BaseConfig&>(config)    = base_config;
+            static_cast<IODevices&>(config)     = io_devices;
+
+            return ResourceSpawner::get_engine(config);
+        }
+    };
+
+}
+
+namespace dg::atomic_buffer::user_interface{
+
+    using namespace dg::atomic_buffer::types;
+    using Config    = resources::BaseConfig;
+    using IODevices = resources::IODevices; 
+
+    extern void mount(Config config){
+
+        resources::ResourceController::defaultize(config);
     }
 
-    extern auto spawn(path_type config_dir, IODevices io_devices) -> std::unique_ptr<engine::Engine>{ //(required) reinstantiate on exception to recover and do state-correction (OS-bound, impossible to have noexcept reverter(destructor))
+    extern void recover(Config config, IODevices io_devices){ //to be invoked on exception (to avoid infinite recursion)
 
+        resources::ResourceController::recover(config, io_devices);   
+    }
+
+    extern auto spawn(Config config, IODevices io_devices) -> std::unique_ptr<engine::Engine>{ //detaching IODevices for performance tuning and, most importantly, testings 
+
+        return resources::ResourceController::spawn(config, io_devices);
     }
 
 };

@@ -232,7 +232,7 @@ namespace dg::fileio::fd_services{
         auto fpath          = path.native();
         int fd              = open(fpath.c_str(), flags, constants::DFLT_MODE);
 
-        auto fclose_lambda  = [=](int * fd_arg) noexcept{
+        auto fclose_lambda  = [](int * fd_arg) noexcept{
             
             if (close(*fd_arg) == -1){
                 std::terminate(); //better to terminate the program at this point
@@ -464,7 +464,7 @@ namespace dg::fileio{
             return CORRUPTED_CONST;
         } catch (std::bad_alloc& e){
             return MEM_EXHAUSTION_CONST;
-        }catch (std::exception& e){
+        } catch (std::exception& e){
             return OTHER_CONST;
         }
 
@@ -494,11 +494,6 @@ namespace dg::fileio{
         std::abort();
         return dg::unexpected(OTHER_CONST); //unreachable
     }
-
-    void mkdir(const path_type& path){
-     
-        std::filesystem::create_directory(path); //REVIEW: 
-    } 
 
     auto get_device_block_size(const path_type& path) -> size_t{
 
@@ -558,6 +553,12 @@ namespace dg::fileio{
         dsync(path.parent_path());
     }
 
+    void mkdir(const path_type& path){
+        
+        std::filesystem::create_directory(path); //
+        dsync(path);
+    } 
+
     void bwrite(const path_type& path, const void * buf, size_t sz){
         
         core::bwrite(path, buf, sz, std::integral_constant<bool, false>{}, std::integral_constant<bool, false>{});
@@ -580,28 +581,32 @@ namespace dg::fileio{
         pdsync(path);
     }
 
-    void rremove(const path_type& path){
+    void rm(const path_type& path){
 
         if (!std::filesystem::remove(path)){
             throw OSError();
         }
     }
 
-    void assert_remove(const path_type& path){
+    void rm_if_exists(const path_type& path){
 
-        rremove(path);
+        if (std::filesystem::exists(path)){
+            rm(path);
+        }
+    }
+
+    void assert_rm(const path_type& path){
+
+        rm(path);
         pdsync(path);
     }
 
-    auto is_symlink(const path_type& path1, const path_type& path2) -> bool{
+    void rename_resolve(const path_type& path1, const path_type& path2){
 
-        return std::filesystem::exists(path1) && std::filesystem::exists(path2) && std::filesystem::equivalent(path1, path2);
-    } 
+        bool precond    =   std::filesystem::exists(path1) && std::filesystem::exists(path2) && std::filesystem::equivalent(path1, path2);
 
-    void symlink_resolve(const path_type& path1, const path_type& path2){ //rm path1 if equivalent
-
-        if (is_symlink(path1, path2)){
-            assert_remove(path1);
+        if (precond){
+            assert_rm(path1);
         }
     }
 
@@ -622,7 +627,7 @@ namespace dg::fileio{
     void sync_remove(const path_type& path){
         
         sync_emptify(path);
-        rremove(path);
+        rm(path);
     } 
 
     void sync_rename(const path_type& old_path, const path_type& new_path){ //sync new_path
@@ -635,15 +640,15 @@ namespace dg::fileio{
     void dual_sync_rename(const path_type& old_path, const path_type& new_path){ //sync both endpoints
 
         sync_rename(old_path, new_path);
-        symlink_resolve(old_path, new_path);
+        rm_if_exists(old_path);
         sync_emptify(old_path);
-        rremove(old_path);
+        rm(old_path);
     }
 
     void atomic_bwrite(const path_type& path, const void * buf, size_t sz){
         
         auto atomic_path = atomic_services::add_atomic_traits(path);
-        symlink_resolve(atomic_path, path);
+        rm_if_exists(atomic_path);
         sync_bwrite(atomic_path, buf, sz);
         sync_rename(atomic_path, path);
     }
@@ -651,7 +656,7 @@ namespace dg::fileio{
     void atomic_direct_bwrite(const path_type& path, const void * buf, size_t sz){
 
         auto atomic_path = atomic_services::add_atomic_traits(path);
-        symlink_resolve(atomic_path, path);
+        rm_if_exists(atomic_path);
         direct_sync_bwrite(atomic_path, buf, sz);
         sync_rename(atomic_path, path);
     }
@@ -683,7 +688,7 @@ namespace dg::fileio{
         auto paths  = list_paths<IS_RECURSIVE>(dir);
         auto last   = std::copy_if(paths.begin(), paths.end(), paths.begin(), atomic_services::has_atomic_traits);
         
-        std::for_each(paths.begin(), last, rremove);
+        std::for_each(paths.begin(), last, rm);
     }
 
     template <bool IS_RECURSIVE = false>
@@ -692,14 +697,15 @@ namespace dg::fileio{
         auto paths  = list_paths<IS_RECURSIVE>(dir);
         auto last   = std::copy_if(paths.begin(), paths.end(), paths.begin(), is_empty_file);
 
-        std::for_each(paths.begin(), last, rremove);
+        std::for_each(paths.begin(), last, rm);
     }
 
     template <bool IS_RECURSIVE = false>
-    void fchk(const path_type& dir){
+    void dskchk(const path_type& dir){
 
         atomic_clean<IS_RECURSIVE>(dir);
         empty_clean<IS_RECURSIVE>(dir);
+        dsync(dir);
     }
 
 }
