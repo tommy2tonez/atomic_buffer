@@ -22,7 +22,6 @@ namespace dg::fileio::types{
 
     using err_type          = uint8_t;
     using path_type         = std::filesystem::path; 
-    using hash_type         = uint32_t; 
 }
 
 namespace dg::fileio::runtime_exception{
@@ -198,27 +197,6 @@ namespace dg::fileio::utility{
         } 
     };
 
-    auto hash(const void * buf, size_t sz) noexcept -> hash_type{ //3rd world implementation
-    
-        using _MemUlt       = MemoryUtility;
-        using _MemIO        = SyncedEndiannessService;
-
-        const void * ibuf   = buf; 
-        const size_t CYCLES = sz / sizeof(hash_type);
-        const hash_type MOD = std::numeric_limits<hash_type>::max() >> 1;
-        hash_type total     = {};
-        hash_type cur       = {};
-
-        for (size_t i = 0; i < CYCLES; ++i){
-            cur     = _MemIO::load<hash_type>(ibuf);
-            cur     %= MOD;
-            total   += cur;
-            total   %= MOD;
-            ibuf    = _MemUlt::forward_shift(ibuf, sizeof(hash_type)); 
-        }
-
-        return total;
-    }
 }
 
 namespace dg::fileio::fd_services{
@@ -517,13 +495,13 @@ namespace dg::fileio{
         return core::bread_into(path, buf, sz, std::integral_constant<bool, true>{});
     }
 
-    auto bread(const path_type& path){
+    auto bread(const path_type& path) -> std::pair<std::unique_ptr<char[]>, size_t>{
 
         auto sz     = size(path);
         auto rs     = std::unique_ptr<char[]>(new char[sz]); 
         bread_into(path, static_cast<void *>(rs.get()), sz);
 
-        return rs;
+        return std::make_pair(std::move(rs), sz);
     }
 
     auto direct_bread(const path_type& path){
@@ -533,7 +511,7 @@ namespace dg::fileio{
         auto rs             = _MemUlt::aligned_alloc(constants::STRICTEST_BLOCK_SZ, sz); 
         direct_bread_into(path, static_cast<void *>(rs.get()), sz);
 
-        return rs;
+        return std::make_pair(std::move(rs), sz);
     }
 
     void ffsync(const path_type& path){
@@ -705,91 +683,8 @@ namespace dg::fileio{
 
         atomic_clean<IS_RECURSIVE>(dir);
         empty_clean<IS_RECURSIVE>(dir);
-        dsync(dir);
+        dsync(dir); //
     }
 
 }
-
-// namespace dg::fileio::integrity{
-
-//     auto integrity_bread_into(const path_type& path, void * buf, size_t sz) -> std::pair<void *, size_t>{
-
-//         using _MemIO        = SyncedEndiannessService;
-//         using _MemUlt       = MemoryUtility;
-
-//         auto new_hash       = hash_type{};
-//         auto old_hash_buf   = _MemUlt::aligned_empty_alloc(STRICTEST_BLOCK_SZ, STRICTEST_BLOCK_SZ); 
-//         auto new_hash_buf   = _MemUlt::aligned_empty_alloc(STRICTEST_BLOCK_SZ, STRICTEST_BLOCK_SZ);
-//         auto fptr           = assert_open_file(path, READ_FLAG);
-//         auto fsz            = seekg(*fptr, 0L, SEEK_END);
-//         auto true_sz        = static_cast<intmax_t>(fsz) - STRICTEST_BLOCK_SZ;
-
-//         if (true_sz < 0){
-//             throw CorruptedError();
-//         }
-
-//         if (sz < true_sz){
-//             throw BOFError();
-//         }
-
-//         seekg(*fptr, 0L, SEEK_SET);
-//         readf(*fptr, static_cast<void *>(old_hash_buf.get()), STRICTEST_BLOCK_SZ);
-//         readf(*fptr, buf, true_sz);
-
-//         new_hash    = hash(buf, true_sz);
-//         _MemIO::dump(static_cast<void *>(new_hash_buf.get()), new_hash);
-        
-//         if (std::memcmp(static_cast<const void *>(new_hash_buf.get()), static_cast<const void *>(old_hash_buf.get()), STRICTEST_BLOCK_SZ) != 0){
-//             throw CorruptedError();
-//         }
-
-//         return {buf, true_sz};
-//     }
-
-//     void integrity_bwrite(const path_type& path, const void * buf, size_t sz, int flags = WRITE_FLAG){
-
-//         using _MemUlt       = MemoryUtility;
-//         using _MemIO        = SyncedEndiannessService;
-
-//         auto fptr           = assert_open_file(path, flags);
-//         auto hashed         = hash(buf, sz);
-//         auto hash_buf       = _MemUlt::aligned_empty_alloc(STRICTEST_BLOCK_SZ, STRICTEST_BLOCK_SZ);
-
-//         _MemIO::dump(static_cast<void *>(hash_buf.get()), hashed);
-        
-//         seekg(*fptr, 0L, SEEK_SET);
-//         writef(*fptr, static_cast<const void *>(hash_buf.get()), STRICTEST_BLOCK_SZ);
-//         writef(*fptr, buf, sz);
-//     }
-
-//     auto corrupted_filter(const std::vector<path_type>& paths) -> std::vector<path_type>{
-        
-//         using _MemUlt       = MemoryUtility;
-//         auto tmp_buf_sz     = size_t{1024};
-//         auto tmp_buf        = _MemUlt::aligned_empty_alloc(STRICTEST_BLOCK_SZ, tmp_buf_sz);
-//         auto rs             = std::vector<path_type>();
-
-//         for (const path_type& path: paths){
-//             try{
-//                 size_t cur_file_sz  = file_sz(path);
-//                 if (tmp_buf_sz < cur_file_sz){
-//                     tmp_buf_sz  = cur_file_sz;
-//                     tmp_buf     = _MemUlt::aligned_empty_alloc(STRICTEST_BLOCK_SZ, tmp_buf_sz);
-//                 }
-//                 integrity_bread_into(path, tmp_buf.get(), tmp_buf_sz);
-//             } catch (CorruptedError& e){
-//                 rs.push_back(path);
-//             }
-//         } 
-
-//         return rs;
-//     }
-    
-//     void integrity_atomic_bwrite(const path_type& path, const void * buf, size_t sz){
-
-//         auto atomic_path = add_atomic_traits(path);
-//         integrity_bwrite(atomic_path, buf, sz, WRITE_SYNC_FLAG);
-//         std::filesystem::rename(atomic_path, path);
-//     }
-// }
 #endif

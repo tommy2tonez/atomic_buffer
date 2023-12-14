@@ -92,6 +92,16 @@ void verify(const void * buf, size_t sz, const void * bbuf, size_t ssz){
     std::cout << "passed" << std::endl;
 }
 
+auto get_random_buf(size_t buf_sz){
+
+    static auto buf_rdevice     = std::bind(std::uniform_int_distribution<size_t>{}, std::mt19937{});
+    
+    auto buf                    = dg::fileio::utility::MemoryUtility::aligned_alloc(dg::fileio::constants::STRICTEST_BLOCK_SZ, buf_sz);
+    std::generate(static_cast<size_t *>(buf.get()), static_cast<size_t *>(buf.get()) + (buf_sz / sizeof(size_t)), buf_rdevice);
+    
+    return buf;
+}
+
 auto get_random_buf(const size_t PAGE_SZ, const size_t RANDOM_SPAN) -> std::pair<std::unique_ptr<char[]>, size_t>{
 
     static auto random_device   = std::bind(std::uniform_int_distribution<size_t>{}, std::mt19937{});
@@ -109,12 +119,12 @@ auto get_random_buf(const size_t PAGE_SZ, const size_t RANDOM_SPAN) -> std::pair
     return {std::move(buf), buf_sz};
 }
 
-void recover_until_noexcept(auto config, auto reading_dev){
+void recover_until_noexcept(auto config){
 
     try{
-        dg::atomic_buffer::user_interface::recover(config, reading_dev);
+        dg::atomic_buffer::user_interface::recover(config);
     } catch (std::exception& e){
-        recover_until_noexcept(config, reading_dev);
+        recover_until_noexcept(config);
     }
 }
 
@@ -124,7 +134,7 @@ void anchor_no_except(auto config, auto devs){
         auto ins    =  dg::atomic_buffer::user_interface::spawn(config, devs);
         ins->anchor();
     } catch (std::exception& e){
-        recover_until_noexcept(config, devs);
+        recover_until_noexcept(config);
         anchor_no_except(config, devs);
     }
 }
@@ -137,20 +147,31 @@ void rollback_no_except(auto config, auto devs){
         ins->rollback();
     } catch (std::exception& e){
 
-        recover_until_noexcept(config, devs);
+        recover_until_noexcept(config);
         rollback_no_except(config, devs);
     }
+}
+
+template <class Executable>
+auto timeit(Executable exe) -> size_t{
+
+    using namespace std::chrono;
+    auto beg    = high_resolution_clock().now();
+    exe();
+    auto lapsed = duration_cast<milliseconds>(high_resolution_clock().now() - beg).count();
+
+    return lapsed;
 }
 
 int main(){
 
     size_t i                    = 0u;
-    const size_t PAGE_SZ        = 100;
-    const size_t RANDOM_SPAN    = 10;
-    const size_t MAX_PAGES      = 10;
+    const size_t PAGE_SZ        = 1 << 8; 
+    const size_t PAGE_COUNT     = 10;
+    const size_t RANDOM_SPAN    = PAGE_COUNT;
+    const size_t BUF_SZ         = PAGE_SZ * PAGE_COUNT;
     const char * path           = "atomictest";
-
-    auto config                 = dg::atomic_buffer::user_interface::Config{path, PAGE_SZ, MAX_PAGES};    
+    auto config                 = dg::atomic_buffer::user_interface::Config{path, PAGE_SZ, PAGE_COUNT};    
     dg::atomic_buffer::user_interface::mount(config);
     auto stable_state           = std::make_pair(std::unique_ptr<char[]>(new char[1]), size_t{0u}); 
     auto devs                   = dg::atomic_buffer::user_interface::IODevices{dg::sdio::user_interface::get_reading_device(), 
@@ -158,12 +179,12 @@ int main(){
                                                                                std::make_unique<DefectiveDeletingDevice>(),
                                                                                std::make_unique<DefectiveRenamingDevice>()};
 
+
     while (true){
 
         auto ins                = dg::atomic_buffer::user_interface::spawn(config, devs);
         auto random_buf         = get_random_buf(PAGE_SZ, RANDOM_SPAN);
         anchor_no_except(config, devs);
-
         try{
 
             ins->set_buf(random_buf.first.get());
@@ -182,7 +203,7 @@ int main(){
                 throw std::exception();
             }
         } catch (std::exception& e){
-            recover_until_noexcept(config, devs);
+            recover_until_noexcept(config);
             rollback_no_except(config, devs);
             auto sstable_state      = std::make_pair(ins->load(), ins->size());
             verify(stable_state.first.get(), stable_state.second, sstable_state.first.get(), sstable_state.second);
