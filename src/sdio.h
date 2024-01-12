@@ -11,12 +11,6 @@ namespace dg::sdio::types{
 
     using path_type                     = std::filesystem::path;
     using err_type                      = dg::fileio::err_type; 
-    using io_operation_type             = uint8_t;
-    using io_policy_type                = uint8_t;
-    static constexpr auto phasher       = [](const path_type& path){return std::hash<std::string>{}(path.string());}; 
-    using write_map_type                = std::unordered_map<path_type, std::pair<const void *, size_t>, decltype(phasher)>;
-    using read_map_type                 = std::unordered_map<path_type, std::pair<void *, size_t>, decltype(phasher)>;  
-
 }
 
 namespace dg::sdio::constants{
@@ -146,7 +140,8 @@ namespace dg::sdio::utility{
 
     auto setify(const std::vector<path_type>& paths) -> std::vector<path_type>{
 
-        const auto hasher   = [](const path_type& path){return std::hash<std::string>{}(path.string());};
+        using native_type   = std::remove_const_t<std::remove_reference_t<decltype(std::declval<path_type>().native())>>;
+        const auto hasher   = [](const path_type& path){return std::hash<native_type>{}(path.native());};
         auto path_set       = std::unordered_set<path_type, decltype(hasher)>(paths.begin(), paths.end(), paths.size(), hasher);
         auto rs             = std::vector<path_type>(path_set.begin(), path_set.end());
 

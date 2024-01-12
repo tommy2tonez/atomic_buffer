@@ -14,6 +14,11 @@
 #include <optional>
 #include <numeric>
 
+namespace dg::compact_serializer::constants{
+
+    static constexpr auto endianness    = std::endian::little;
+}
+
 namespace dg::compact_serializer::types{
 
     using hash_type     = uint64_t; 
@@ -35,11 +40,11 @@ namespace dg::compact_serializer::types_space{
     template <class T>
     struct is_tuple<T, std::void_t<decltype(std::tuple_size<T>::value)>>: std::true_type{};
 
-    template <class T>
+    template <class T, class = void>
     struct is_unique_ptr: std::false_type{};
 
     template <class T>
-    struct is_unique_ptr<std::unique_ptr<T>>: std::true_type{}; 
+    struct is_unique_ptr<std::unique_ptr<T>, std::void_t<std::enable_if_t<!std::is_array_v<T>>>>: std::true_type{}; 
 
     template <class T>
     struct is_optional: std::false_type{};
@@ -77,11 +82,17 @@ namespace dg::compact_serializer::types_space{
     template <class ...Args>
     struct is_set<std::set<Args...>>: std::true_type{};
 
+    template <class T>
+    struct is_basic_string: std::false_type{};
+
+    template <class ...Args>
+    struct is_basic_string<std::basic_string<Args...>>: std::true_type{};
+
     template <class T, class = void>
-    struct is_serializable: std::false_type{};
+    struct is_reflectible: std::false_type{};
 
     template <class T>
-    struct is_serializable<T, std::void_t<decltype(std::declval<T>().dg_reflect(nil_lambda))>>: std::true_type{};
+    struct is_reflectible<T, std::void_t<decltype(std::declval<T>().dg_reflect(nil_lambda))>>: std::true_type{};
     
     template <class T, class U, class = void>
     struct has_same_size: std::false_type{};
@@ -89,36 +100,27 @@ namespace dg::compact_serializer::types_space{
     template <class T, class U>
     struct has_same_size<T, U, std::void_t<std::enable_if_t<sizeof(T) == sizeof(U), bool>>>: std::true_type{};
 
-    template <class T>
-    using base_type = std::remove_const_t<std::remove_reference_t<T>>;
+    template <class T, class = void>
+    struct is_dg_arithmetic: std::is_arithmetic<T>{};
 
     template <class T>
-    struct recursive_const_strip: std::remove_const<T>{}; 
+    struct is_dg_arithmetic<T, std::void_t<std::enable_if_t<std::is_floating_point_v<T>>>>: std::bool_constant<std::numeric_limits<T>::is_iec559>{}; 
 
-    template <class ...Args>
-    struct recursive_const_strip<std::pair<Args...>>{
-        using type = std::pair<typename recursive_const_strip<Args>::type...>;
+    template <class T, class = void>
+    struct containee_type{};
+
+    template <class T>
+    struct containee_type<T, std::void_t<std::enable_if_t<std::disjunction_v<is_vector<T>, is_unordered_set<T>, is_set<T>, is_basic_string<T>>>>>{
+        using type  = typename T::value_type;
     };
 
-    template <class ...Args>
-    struct recursive_const_strip<std::tuple<Args...>>{
-        using type  = std::tuple<typename recursive_const_strip<Args>::type...>;
+    template <class T>
+    struct containee_type<T, std::void_t<std::enable_if_t<std::disjunction_v<is_unordered_map<T>, is_map<T>>>>>{
+        using type  = std::pair<typename T::key_type, typename T::mapped_type>;
     };
 
     template <class T>
-    using recursive_const_strip_t   = typename recursive_const_strip<T>::type;
-
-    template <class ...Args>
-    static constexpr auto is_basic_string_convertible_(std::basic_string<Args...>&) -> std::true_type;
-
-    template <class T>
-    static constexpr auto is_basic_string_convertible_(T&&) -> std::false_type; 
-
-    template <class T>
-    struct is_basic_string_convertile: decltype(is_basic_string_convertible_(std::declval<T&>())){}; 
-
-    template <class T>
-    static constexpr bool is_container_v    = std::disjunction_v<is_vector<T>, is_unordered_map<T>, is_unordered_set<T>, is_map<T>, is_set<T>, is_basic_string_convertile<T>>;
+    static constexpr bool is_container_v    = std::disjunction_v<is_vector<T>, is_unordered_map<T>, is_unordered_set<T>, is_map<T>, is_set<T>, is_basic_string<T>>;
 
     template <class T>
     static constexpr bool is_tuple_v        = is_tuple<T>::value; 
@@ -133,7 +135,13 @@ namespace dg::compact_serializer::types_space{
     static constexpr bool is_nillable_v     = is_unique_ptr_v<T> | is_optional_v<T>; 
 
     template <class T>
-    static constexpr bool is_serializable_v = is_serializable<T>::value;
+    static constexpr bool is_reflectible_v  = is_reflectible<T>::value;
+
+    template <class T>
+    using base_type                         = std::remove_const_t<std::remove_reference_t<T>>;
+
+    template <class T>
+    static constexpr bool is_dg_arithmetic_v    = is_dg_arithmetic<T>::value;
 }
 
 namespace dg::compact_serializer::utility{
@@ -145,31 +153,25 @@ namespace dg::compact_serializer::utility{
         static constexpr auto is_native_big      = bool{std::endian::native == std::endian::big};
         static constexpr auto is_native_little   = bool{std::endian::native == std::endian::little};
         static constexpr auto precond            = bool{(is_native_big ^ is_native_little) != 0};
-        static constexpr auto deflt              = std::endian::little; 
+        static constexpr auto deflt              = constants::endianness; 
         static constexpr auto native_uint8       = is_native_big ? uint8_t{0} : uint8_t{1}; 
 
         static_assert(precond); //xor
 
         template <class T, std::enable_if_t<std::is_arithmetic_v<T>, bool> = true>
-        static constexpr T bswap(T value){
+        static inline T bswap(T value){
             
-            constexpr auto LOWER_BIT_MASK   = ~char{0};
-            constexpr auto idx_seq          = std::make_index_sequence<sizeof(T)>();
-            T rs{};
-
-            [&]<size_t ...IDX>(const std::index_sequence<IDX...>&){
-                (
-                    [&](size_t){
-
-                        rs <<= CHAR_BIT;
-                        rs |= value & LOWER_BIT_MASK;
-                        value >>= CHAR_BIT;
-
-                    }(IDX), ...
-                );
+            char src[sizeof(T)]; 
+            char dst[sizeof(T)];
+            const auto idx_seq  = std::make_index_sequence<sizeof(T)>();
+            
+            std::memcpy(src, &value, sizeof(T));
+            [&]<size_t ...IDX>(const std::index_sequence<IDX...>){
+                ((dst[IDX] = src[sizeof(T) - IDX - 1]), ...);
             }(idx_seq);
+            std::memcpy(&value, dst, sizeof(T));
 
-            return rs;
+            return value;
         }
 
         template <class T, std::enable_if_t<std::is_arithmetic_v<T>, bool> = true>
@@ -196,7 +198,6 @@ namespace dg::compact_serializer::utility{
         }
 
         static inline const auto bswap_lambda   = []<class ...Args>(Args&& ...args){return bswap(std::forward<Args>(args)...);}; 
-
     };
 
     //not working for double/ float 
@@ -248,7 +249,7 @@ namespace dg::compact_serializer::utility{
     }
 
     template <class T, std::enable_if_t<std::disjunction_v<types_space::is_vector<T>, 
-                                                           types_space::is_basic_string_convertile<T>>, bool> = true>
+                                                           types_space::is_basic_string<T>>, bool> = true>
     constexpr auto get_inserter(){
 
         auto inserter   = []<class U, class ...Args>(U&& container, Args&& ...args){
@@ -294,7 +295,7 @@ namespace dg::compact_serializer::archive{
 
         Forward(BaseArchive base_archive): base_archive(base_archive){} 
 
-        template <class T, std::enable_if_t<std::is_arithmetic_v<types_space::base_type<T>>, bool> = true>
+        template <class T, std::enable_if_t<types_space::is_dg_arithmetic_v<types_space::base_type<T>>, bool> = true>
         void put(char *& buf, T&& data) const noexcept{
             
             static_assert(noexcept(this->base_archive(buf, std::forward<T>(data))));
@@ -332,7 +333,7 @@ namespace dg::compact_serializer::archive{
             }
         }
 
-        template <class T, std::enable_if_t<types_space::is_serializable_v<types_space::base_type<T>>, bool> = true>
+        template <class T, std::enable_if_t<types_space::is_reflectible_v<types_space::base_type<T>>, bool> = true>
         void put(char *& buf, T&& data) const noexcept{
 
             auto _self      = Self(this->base_archive);
@@ -348,7 +349,7 @@ namespace dg::compact_serializer::archive{
 
         using Self  = Backward;
 
-        template <class T, std::enable_if_t<std::is_arithmetic_v<types_space::base_type<T>>, bool> = true>
+        template <class T, std::enable_if_t<types_space::is_dg_arithmetic_v<types_space::base_type<T>>, bool> = true>
         void put(const char *& buf, T&& data) const{
 
             using btype     = types_space::base_type<T>;
@@ -387,8 +388,8 @@ namespace dg::compact_serializer::archive{
         template <class T, std::enable_if_t<types_space::is_container_v<types_space::base_type<T>>, bool> = true>
         void put(const char *& buf, T&& data) const{
             
-            using btype     = typename types_space::base_type<T>;
-            using elem_type = types_space::recursive_const_strip_t<typename btype::value_type>;
+            using btype     = types_space::base_type<T>;
+            using elem_type = types_space::containee_type<btype>::type;
             auto sz         = types::size_type{}; 
             auto isrter     = utility::get_inserter<btype>();
 
@@ -402,7 +403,7 @@ namespace dg::compact_serializer::archive{
             }
         }
 
-        template <class T, std::enable_if_t<types_space::is_serializable_v<types_space::base_type<T>>, bool> = true>
+        template <class T, std::enable_if_t<types_space::is_reflectible_v<types_space::base_type<T>>, bool> = true>
         void put(const char *& buf, T&& data) const{
 
             auto archiver   = [&buf]<class ...Args>(Args&& ...args){ //REVIEW: rm [&]

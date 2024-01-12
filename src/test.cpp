@@ -165,6 +165,18 @@ auto timeit(Executable exe) -> size_t{
 
 int main(){
 
+    //WLOG, assume every data ingestion problem can be quantified as ingesting a singular buffer
+    //the buffer is partitioned and resided in many servers (producers)
+    //kafca is responsible for managing 2 components(the overall heap and the associated atomic buffer) and do pull - pull pattern (pull-pull pattern can be directly from consumer - producer or consumer - kafca - producer)  
+    //assume every leaf node spans 1kb - the overhead ~= 0.001% of the total ingesting memory
+    //kafka sends every msg as a processed token - this can reduce the efficiency 
+    //kafca sends every msg as an interval containing at least 1 unprocessed token (convergence issues)
+    //consumer is responsible for returning the unprocessed interval - which will be written back to the heap and sent out once exhausted   
+    //assume that a graph has many replicas - then this approach is essential for reducing network bandwidth while replicating or recovering 
+    //given a set of transferers and their replicas, and a set of transferees. Find the fastest way to "pipe" data from transferers -> transferees
+
+    //nxm benchmark - leetcode problem (brute force) 
+
     size_t i                    = 0u;
     const size_t PAGE_SZ        = 1 << 8; 
     const size_t PAGE_COUNT     = 10;
@@ -195,7 +207,7 @@ int main(){
             auto loaded     = ins->load(); 
             auto ssz        = ins->size();
             verify(random_buf.first.get(), random_buf.second, loaded.get(), ssz);
-
+            
             if (i % 2 == 0){
                 anchor_no_except(config, devs);
                 stable_state    = std::make_pair(std::move(random_buf.first), random_buf.second); 

@@ -83,68 +83,6 @@ namespace dg::fileio::utility{
 
     using namespace dg::fileio::types;   
 
-    struct SyncedEndiannessService{
-        
-        static constexpr auto is_native_big      = bool{std::endian::native == std::endian::big};
-        static constexpr auto is_native_little   = bool{std::endian::native == std::endian::little};
-        static constexpr auto precond            = bool{(is_native_big ^ is_native_little) != 0};
-        static constexpr auto deflt              = std::endian::little; 
-        static constexpr auto native_uint8       = is_native_big ? uint8_t{0} : uint8_t{1}; 
-
-        static_assert(precond); //xor
-
-        template <class T, std::enable_if_t<std::is_arithmetic_v<T>, bool> = true>
-        static constexpr T bswap(T value){
-            
-            constexpr auto LOWER_BIT_MASK   = ~((char) 0u);
-            constexpr auto idx_seq          = std::make_index_sequence<sizeof(T)>();
-            T rs{};
-
-            [&]<size_t ...IDX>(const std::index_sequence<IDX...>&){
-                (
-                    [&](size_t){
-
-                        rs <<= CHAR_BIT;
-                        rs |= value & LOWER_BIT_MASK;
-                        value >>= CHAR_BIT;
-
-                    }(IDX), ...
-                );
-            }(idx_seq);
-
-            return rs;
-
-        }
-
-        template <class T, std::enable_if_t<std::is_arithmetic_v<T>, bool> = true>
-        static inline void dump(void * dst, T data) noexcept{    
-
-            if constexpr(std::endian::native != deflt){
-                data = bswap(data);
-            }
-
-            std::memcpy(dst, &data, sizeof(T));
-
-        }
-
-        template <class T, std::enable_if_t<std::is_arithmetic_v<T>, bool> = true>
-        static inline T load(const void * src) noexcept{
-            
-            T rs{};
-            std::memcpy(&rs, src, sizeof(T));
-
-            if constexpr(std::endian::native != deflt){
-                rs = bswap(rs);
-            }
-
-            return rs;
-
-        }
-
-        static inline const auto bswap_lambda   = []<class ...Args>(Args&& ...args){return bswap(std::forward<Args>(args)...);}; 
-
-    };
-
     struct MemoryUtility{
 
         template <uintptr_t ALIGNMENT>
@@ -173,28 +111,6 @@ namespace dg::fileio::utility{
             
             return std::unique_ptr<void, decltype(destructor)>(buf, destructor);
         }
-
-        static inline auto aligned_empty_alloc(size_t alignment, size_t sz){
-
-            auto rs = aligned_alloc(alignment, sz);
-            std::memset(rs.get(), int{}, sz);
-            return rs;
-        }
-
-        static inline auto forward_shift(void * buf, size_t sz) noexcept -> void *{
-
-            return reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(buf) + sz);
-        }
-
-        static inline auto forward_shift(const void * buf, size_t sz) noexcept -> const void *{
-
-            return reinterpret_cast<const void *>(reinterpret_cast<uintptr_t>(buf) + sz);
-        }
-        
-        static inline auto get_distance_vector(const void * _from, const void * _to) noexcept -> intptr_t{
-
-            return reinterpret_cast<intptr_t>(_to) - reinterpret_cast<intptr_t>(_from); 
-        } 
     };
 
 }
@@ -293,7 +209,7 @@ namespace dg::fileio::fd_services{
             std::abort(); //SEGFAULT equivalent
         }
 
-        if (write(fd, buf, sz) != sz){ //REVIEW: benchmark required (is discretization required?)
+        if (write(fd, buf, sz) != sz){
             throw OSError();
         }
     }
@@ -315,7 +231,7 @@ namespace dg::fileio::fd_services{
             std::abort(); //SEGFAULT equivalent
         }
 
-        if (read(fd, buf, sz) != sz){ //REVIEW: benchmark required (is discretization required?)
+        if (read(fd, buf, sz) != sz){
             throw OSError();
         }
     }
@@ -588,7 +504,7 @@ namespace dg::fileio{
         }
     }
 
-    auto is_empty_file(const path_type& path) -> bool{
+    auto is_empty(const path_type& path) -> bool{
 
         return size(path) == 0u;
     }
@@ -673,7 +589,7 @@ namespace dg::fileio{
     void empty_clean(const path_type& dir){
 
         auto paths  = list_paths<IS_RECURSIVE>(dir);
-        auto last   = std::copy_if(paths.begin(), paths.end(), paths.begin(), is_empty_file);
+        auto last   = std::copy_if(paths.begin(), paths.end(), paths.begin(), is_empty);
 
         std::for_each(paths.begin(), last, rm);
     }

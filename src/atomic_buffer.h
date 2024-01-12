@@ -287,79 +287,6 @@ namespace dg::atomic_buffer::utility{
     template <class = void>
     static constexpr bool FALSE_VAL = false;
 
-    struct SyncedEndiannessService{
-        
-        static constexpr auto is_native_big      = bool{std::endian::native == std::endian::big};
-        static constexpr auto is_native_little   = bool{std::endian::native == std::endian::little};
-        static constexpr auto precond            = bool{(is_native_big ^ is_native_little) != 0};
-        static constexpr auto deflt              = std::endian::little; 
-        static constexpr auto native_uint8       = is_native_big ? uint8_t{0} : uint8_t{1}; 
-
-        static_assert(precond); //xor
-
-        template <class T, std::enable_if_t<std::is_arithmetic_v<T>, bool> = true>
-        static constexpr T bswap(T value){
-            
-            constexpr auto LOWER_BIT_MASK   = ~((char) 0u);
-            constexpr auto idx_seq          = std::make_index_sequence<sizeof(T)>();
-            T rs{};
-
-            [&]<size_t ...IDX>(const std::index_sequence<IDX...>&){
-                (
-                    [&](size_t){
-
-                        rs <<= CHAR_BIT;
-                        rs |= value & LOWER_BIT_MASK;
-                        value >>= CHAR_BIT;
-
-                    }(IDX), ...
-                );
-            }(idx_seq);
-
-            return rs;
-        }
-
-        static inline auto aligned_alloc(size_t alignment, size_t sz){
-
-            void * buf      = std::aligned_alloc(alignment, sz);
-            auto destructor = [](void * buf) noexcept{
-                std::free(buf);
-            };
-
-            if (!buf){
-                throw std::bad_alloc();
-            }
-            
-            return std::unique_ptr<void, decltype(destructor)>(buf, destructor);
-        }
-
-        template <class T, std::enable_if_t<std::is_arithmetic_v<T>, bool> = true>
-        static inline void dump(void * dst, T data) noexcept{    
-
-            if constexpr(std::endian::native != deflt){
-                data = bswap(data);
-            }
-
-            std::memcpy(dst, &data, sizeof(T));
-        }
-
-        template <class T, std::enable_if_t<std::is_arithmetic_v<T>, bool> = true>
-        static inline T load(const void * src) noexcept{
-            
-            T rs{};
-            std::memcpy(&rs, src, sizeof(T));
-
-            if constexpr(std::endian::native != deflt){
-                rs = bswap(rs);
-            }
-
-            return rs;
-        }
-
-        static inline const auto bswap_lambda   = []<class ...Args>(Args&& ...args){return bswap(std::forward<Args>(args)...);}; 
-
-    };
-
     struct MemoryUtility{
 
         template <uintptr_t ALIGNMENT>
@@ -388,10 +315,10 @@ namespace dg::atomic_buffer::utility{
             return std::unique_ptr<void, decltype(destructor)>(buf, destructor);
         }
 
-        static inline auto aligned_empty_alloc(size_t alignment, size_t sz){
+        static inline auto aligned_calloc(size_t alignment, size_t sz){
 
             auto rs = aligned_alloc(alignment, sz);
-            std::memset(rs.get(), int{}, sz);
+            std::memset(rs.get(), 0u, sz);
             return rs;
         } 
 
@@ -404,11 +331,7 @@ namespace dg::atomic_buffer::utility{
 
             return reinterpret_cast<const void *>(reinterpret_cast<uintptr_t>(buf) + sz);
         }
-        
-        static inline auto get_distance_vector(const void * _from, const void * _to) noexcept -> intptr_t{
 
-            return reinterpret_cast<intptr_t>(_to) - reinterpret_cast<intptr_t>(_from); 
-        } 
     };
 
     struct PageUtility{
@@ -502,31 +425,6 @@ namespace dg::atomic_buffer::utility{
             return rs;
         } 
     };
-
-    template <class T, class ...Args, std::enable_if_t<std::is_unsigned_v<T>, bool> = true>
-    auto cast_str(Args&& ...args) -> T{
-        
-        auto cast_lambda = [&]{
-            if constexpr(sizeof(T) <= sizeof(unsigned long)){
-                return std::stoul(std::forward<Args>(args)...); 
-            } else if constexpr(sizeof(T) <= sizeof(unsigned long long)){ //bad
-                return std::stoull(std::forward<Args>(args)...); //bad
-            } else{
-                static_assert(FALSE_VAL<>);
-                return {};
-            }
-        };
-
-        auto casted_val     = cast_lambda();
-        using casted_type   = decltype(casted_val); 
-        auto is_valid       = std::clamp(casted_val, casted_type{std::numeric_limits<T>::min()}, casted_type{std::numeric_limits<T>::max()}) == casted_val;
-
-        if (!is_valid){
-            throw std::bad_cast();
-        }
-
-        return static_cast<T>(casted_val);
-    }
 };
 
 namespace dg::atomic_buffer::state{
@@ -1025,7 +923,7 @@ namespace dg::atomic_buffer::page{
                 auto pos                = std::find_if(fname.begin(), fname.end(), nis_digit);
 
                 std::copy(fname.begin(), pos, std::back_inserter(fdigit));
-                return utility::cast_str<page_id_type>(fdigit);
+                return std::stoull(fdigit); //FIXME: not u32 compatible bad-assumption should do string parsing  
             }
     };
 
@@ -1281,7 +1179,7 @@ namespace dg::atomic_buffer::page_reservation{
                 auto seq_pages  = std::vector<page_id_type>(page_count);
                 auto diff       = std::vector<page_id_type>();
                 auto write_data = std::vector<std::pair<page_id_type, const void *>>();
-                auto emp_buf    = _MemUlt::aligned_empty_alloc(dg::sdio::constants::STRICTEST_BLOCK_SZ, this->cur_page_info->page_size());
+                auto emp_buf    = _MemUlt::aligned_calloc(dg::sdio::constants::STRICTEST_BLOCK_SZ, this->cur_page_info->page_size());
 
                 std::iota(seq_pages.begin(), seq_pages.end(), 0u);
                 std::sort(cur_pages.begin(), cur_pages.end());
@@ -1346,7 +1244,6 @@ namespace dg::atomic_buffer::checksum{
 
             checksum_type get(immutable_buffer_view buf){
                 
-                using _MemIO    = utility::SyncedEndiannessService; 
                 using _MemUlt   = utility::MemoryUtility;
 
                 const auto MOD  = std::numeric_limits<checksum_type>::max() >> 1;
@@ -1356,15 +1253,11 @@ namespace dg::atomic_buffer::checksum{
                 auto cycles     = static_cast<size_t>(buf.second / sizeof(checksum_type));
 
                 for (size_t i = 0; i < cycles; ++i){
-                    
-                    tmp = _MemIO::load<checksum_type>(ibuf);
-                    tmp %= MOD;
-                    rs  += tmp;
-                    rs  %= MOD;
-                    ibuf = _MemUlt::forward_shift(ibuf, sizeof(checksum_type));
+                    ibuf    = dg::compact_serializer::core::deserialize(reinterpret_cast<const char *>(ibuf), tmp);
+                    tmp     %= MOD;
+                    rs      += tmp;
+                    rs      %= MOD;
                 }
-
-                //REVIEW:
 
                 return rs;
             }
@@ -1439,7 +1332,6 @@ namespace dg::atomic_buffer::page_keeper{
 
             return std::make_unique<StdPageObserver>(std::move(bfilter), page_sz);
         } 
-
     };
 };
 
@@ -1525,7 +1417,7 @@ namespace dg::atomic_buffer::engine{
             
             size_t size(){
                 
-                return this->metadata_fetcher->fetch().buf_sz; //
+                return this->metadata_fetcher->fetch().buf_sz;
             }
 
             std::unique_ptr<char[]> load(){
@@ -1665,7 +1557,7 @@ namespace dg::atomic_buffer::engine{
                 using _MemUlt       = utility::MemoryUtility;
 
                 auto org_buf_sz     = this->metadata_fetcher->fetch().buf_sz; 
-                auto empty_buf      = _MemUlt::aligned_empty_alloc(sdio::constants::STRICTEST_BLOCK_SZ, this->page_sz);
+                auto empty_buf      = _MemUlt::aligned_calloc(sdio::constants::STRICTEST_BLOCK_SZ, this->page_sz);
                 auto old_page_count = _PageUlt::size(org_buf_sz, this->page_sz);
                 auto new_page_count = _PageUlt::size(buf.second, this->page_sz);
                 auto drty_pages     = _PageUlt::shrink_pages(pages, new_page_count); //dirty pages
